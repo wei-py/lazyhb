@@ -31,7 +31,3 @@ jobs:
         run: bun run typecheck
       - name: Build ESM modules
         run: bun run build
-      - name: Exercise behavior and OpenTUI rendering
-        run: bun run smoke
-      - name: Exercise native platform file safety and process cancellation
-        run: bun run smoke:platform

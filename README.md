@@ -221,6 +221,6 @@ bun run smoke:platform
 | Windows | 已实现平台路径／reparse point／进程树取消，已配置 CI；本机未执行 |
 | Linux | 已实现平台路径／描述符文件操作／进程组取消，已配置 CI；本机未执行 |
 
-`.github/workflows/ci.yml` 使用 Bun 1.4.2 在三种系统执行锁定安装、类型检查、构建、OpenTUI 行为检查与平台检查。配置 CI 不等于已收到远端通过结果。
+`.github/workflows/ci.yml` 使用 Bun 1.4.2 在三种系统执行锁定安装、类型检查与构建，不再自动运行 `smoke` 或 `smoke:platform`；手动脚本保留。以上行为与平台检查为历史记录，配置 CI 不等于已收到远端通过结果。
 
 完整研究记录：[CLI 能力](docs/cli-capabilities.md)、[运行发行与产物矩阵](docs/run-publish-workflows.md)、[全配置审计](docs/manifest-config-audit.md)。
