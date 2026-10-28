@@ -1,0 +1,35 @@
+{
+  "name": "lazyhb",
+  "version": "0.2.0",
+  "description": "HBuilderX terminal workspace using Bun and OpenTUI",
+  "type": "module",
+  "engines": {
+    "bun": ">=1.4.0"
+  },
+  "bin": {
+    "lazyhb": "bin/lazyhb.mjs"
+  },
+  "files": ["bin", "dist", "native", "README.md", "docs/cli-capabilities.md", "docs/run-publish-workflows.md", "docs/manifest-config-audit.md"],
+  "packageManager": "bun@1.4.2",
+  "scripts": {
+    "build": "bun --bun ./node_modules/typescript/bin/tsc",
+    "typecheck": "bun --bun ./node_modules/typescript/bin/tsc --noEmit",
+    "start": "bun src/index.ts",
+    "smoke": "bun scripts/smoke.mjs && bun test tests/ui-images.test.ts tests/ui-operations.test.ts tests/ui-themes.test.ts",
+    "smoke:platform": "bun scripts/platform-smoke.mjs",
+    "prepack": "bun run build"
+  },
+  "dependencies": {
+    "@iconify-json/vscode-icons": "1.2.94",
+    "@iconify/utils": "3.1.7",
+    "@opentui/core": "0.7.0",
+    "fast-xml-parser": "^5.3.6",
+    "fflate": "^0.8.2",
+    "json5": "^2.2.3",
+    "sharp": "^0.34.5"
+  },
+  "devDependencies": {
+    "@types/bun": "^1.3.0",
+    "typescript": "^6.0.2"
+  }
+}
