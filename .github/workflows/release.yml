@@ -1,0 +1,50 @@
+name: Release mise archives
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+permissions:
+  contents: write
+jobs:
+  package:
+    strategy:
+      matrix:
+        os: [macos-14, macos-15-intel, ubuntu-24.04, ubuntu-24.04-arm]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: '1.4.2'
+      - name: Validate release tag
+        run: test "$GITHUB_REF_NAME" = "v$(bun -p 'require("./package.json").version')"
+      - run: bun install --frozen-lockfile
+      - run: bun run build
+      - run: bun scripts/package-release.mjs
+      - name: Smoke installed archive
+        run: |
+          mkdir "$RUNNER_TEMP/installed"
+          tar -xzf release/*.tar.gz -C "$RUNNER_TEMP/installed"
+          "$RUNNER_TEMP/installed/lazyhb/bin/lazyhb" --version
+          "$RUNNER_TEMP/installed/lazyhb/bin/lazyhb" --help
+      - uses: actions/upload-artifact@v4
+        with:
+          name: lazyhb-${{ matrix.os }}
+          path: release/*.tar.gz
+  publish:
+    needs: package
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: lazyhb-*
+          merge-multiple: true
+          path: release
+      - name: Publish release assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cd release
+          sha256sum *.tar.gz > SHA256SUMS
+          gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" || gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --title "$GITHUB_REF_NAME" --generate-notes
+          gh release upload "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" ./*.tar.gz SHA256SUMS --clobber

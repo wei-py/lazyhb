@@ -6,6 +6,23 @@ HBuilderX 终端工作台。项目、文件、manifest 配置和本地资源在�
 
 ## 安装与运行
 
+### mise 发行安装
+
+GitHub Release 附件发布后，可安装对应版本：
+
+```sh
+mise use -g github:wei-py/lazyhb@0.2.1
+lazyhb --version
+```
+
+发行包覆盖 macOS / Linux 的 ARM64 与 x64，包含 Bun 运行时和当前平台的原生依赖；安装机器不需要另装 Bun。Windows 暂用下方源码运行方式。
+
+维护者在版本号与 `package.json` 一致的 `v*` tag 上运行 `.github/workflows/release.yml`，生成平台压缩包、SHA256SUMS 并上传 Release。只有 tag、没有 Release 附件时，mise 无法安装。现有 tag 若未包含该工作流，需要先把工作流提交到发布提交，再发布新版本；不要覆盖已发布 tag。
+
+本机可用 `bun run build && bun scripts/package-release.mjs /tmp/lazyhb-release` 生成当前平台发行包。包内 `bin/lazyhb` 使用相邻 `lib/bun` 启动，保留完整依赖与 POSIX FFI 源文件，不跨平台复制原生依赖。
+
+### 源码运行
+
 运行时只需要 **Bun 1.4.0+**；本项目与 CI 固定使用 **Bun 1.4.2**。界面使用 OpenTUI，不需要 Node.js、Python、uv 或 `--experimental-ffi`。
 
 ```sh
