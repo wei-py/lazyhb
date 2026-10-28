@@ -1,6 +1,6 @@
 {
   "name": "lazyhb",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "HBuilderX terminal workspace using Bun and OpenTUI",
   "type": "module",
   "engines": {
