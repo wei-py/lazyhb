@@ -48,15 +48,19 @@ export function taskChoices(commands: readonly Command[], kind: TaskKind, projec
     };
     if (kind === "run") {
       if (family !== "launch") continue;
-      const ui = ["false", "0"].find((value) => supports("ui", value));
+      const ui = ["false", "0"].find((value) => command.parameters.find((parameter) => parameter.name === "ui")?.choices.includes(value));
       const native = ["app-android", "app-ios", "app-harmony", "mp-harmony"].includes(target);
       const base: Record<string, string> = ui ? { ui } : {};
       const prerequisites = target === "app-ios" ? "连接 iPhone 真机、iOS 运行组件；UTS 开发证书凭据若需 argv 密码则安全策略拒绝"
-        : native ? "连接设备并安装平台 CLI 工具链；自定义基座须预先云打包" : "安装对应编译组件；实际运行需要浏览器或开发者工具";
+        : native ? "连接设备并安装平台 CLI 工具链；自定义基座须预先云打包"
+          : target === "web" ? "安装 Web 编译组件与所选浏览器；多个项目启动前分别配置开发端口"
+            : "安装对应编译组件；实际运行需要浏览器或开发者工具";
       if (native) add("run", "设备运行", "run", { ...base, ...(has("compile") ? { compile: "false" } : {}), ...(target === "app-ios" && has("iosTarget") ? { iosTarget: "device" } : {}) }, "编译、安装并启动所选设备应用", prerequisites, "会部署到设备；不启动 IDE 或图形模拟器",
         !ui ? "当前 CLI 未提供可核实的 ui=false 纯 CLI 模式" : has("compile") && !supports("compile", "false") ? "当前 CLI 只支持编译" : target === "app-ios" && has("iosTarget") && !supports("iosTarget", "device") ? "当前 CLI 不支持 iPhone 真机模式" : undefined);
-      else add("external", ["web", "mp-", "quickapp-"].some((prefix) => target === prefix || target.startsWith(prefix)) ? "实际运行（外部 GUI 缺口）" : "实际运行（能力未核实）", "run", {}, "实际目标运行（未执行）", prerequisites, "不执行", /^(?:web$|mp-|quickapp-)/.test(target) ? "实际运行依赖外部浏览器、开发者工具或模拟器，不符合当前无 GUI 合同；请选择仅编译" : "此 launch 目标的运行语义尚未核实，不推断其无 GUI 安全性；可查看高级 CLI help");
-      if (ui && supports("compile", "true")) add("compile", "仅编译", "compile", { ...base, compile: "true", ...(target === "app-ios" && has("iosTarget") && supports("iosTarget", "device") ? { iosTarget: "device" } : {}) }, "开发编译结果（不是设备运行，也不是发行安装包）", "需要平台编译组件；不启动目标应用或外部 GUI");
+      else if (target === "web") add("run", "Web 开发运行", "run", { ...base, compile: "false" }, "Web 开发服务并在浏览器中运行", prerequisites, "会启动浏览器；不启动图形 IDE；不同项目避免端口冲突，同项目并发可能争用编译目录",
+        !ui ? "当前 CLI 未提供可核实的 ui=false / 0 纯 CLI 模式" : !command.parameters.find((parameter) => parameter.name === "compile")?.choices.includes("false") ? "当前 CLI 未明确支持 compile=false Web 运行；请选择受支持的仅编译模式" : undefined);
+      else add("external", ["mp-", "quickapp-"].some((prefix) => target.startsWith(prefix)) ? "实际运行（外部 GUI 缺口）" : "实际运行（能力未核实）", "run", {}, "实际目标运行（未执行）", prerequisites, "不执行", /^(?:mp-|quickapp-)/.test(target) ? "实际运行依赖外部开发者工具或模拟器，不符合当前授权范围；请选择仅编译" : "此 launch 目标的运行语义尚未核实，不推断其无 GUI 安全性；可查看高级 CLI help");
+      if (ui && (target === "web" ? command.parameters.find((parameter) => parameter.name === "compile")?.choices.includes("true") : supports("compile", "true"))) add("compile", "仅编译", "compile", { ...base, compile: "true", ...(target === "app-ios" && has("iosTarget") && supports("iosTarget", "device") ? { iosTarget: "device" } : {}) }, "开发编译结果（不是设备运行，也不是发行安装包）", "需要平台编译组件；不启动目标应用或外部 GUI");
       continue;
     }
     if (family === "publish") {
@@ -98,6 +102,7 @@ export function taskParameters(choice: TaskChoice, values: Record<string, string
     if (choice.id.endsWith(":config")) return key === "config";
     if (key === "config") return false;
     if (choice.command.name === "publish" && !/^app(?:-|$)/.test(choice.target) && key === "type") return false;
+    if (name === "launch web" && choice.mode === "compile" && key === "browser") return false;
     if (parameter.required) return true;
     if (choice.defaults.type === "appResource" && ["name", "path", "confuse", "sourceMap"].includes(key)) return false;
     if (name.startsWith("publish mp-") && key === "subPackage" && !choice.id.endsWith(":subpackage")) return false;
@@ -123,6 +128,10 @@ export function validateTask(choice: TaskChoice, values: Record<string, string>)
     if (choice.command.parameters.some((parameter) => parameter.name === key) && !values[key]?.trim()) throw new Error(`当前模式必须填写 --${key}`);
   };
   for (const [key, value] of Object.entries(choice.defaults)) if (values[key] !== value) throw new Error(`此模式固定 --${key} ${value}`);
+  if (choice.command.name === "launch web" && values.browser) {
+    const browser = choice.command.parameters.find((parameter) => parameter.name === "browser");
+    if (!browser || browser.choices.length && !browser.choices.includes(values.browser)) throw new Error("当前 CLI 不支持所选 Web 浏览器");
+  }
   if (choice.command.name === "pack" && !choice.id.endsWith(":config")) {
     const platforms = (values.platform || "android").split(",");
     if (platforms.some((platform) => !["android", "ios"].includes(platform))) throw new Error("云打包平台仅 android / ios，使用英文逗号多选");

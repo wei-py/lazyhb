@@ -3,7 +3,7 @@ import * as fs from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { HXClient } from "../dist/hx.js";
-import { taskChoices, taskMode } from "../dist/task-catalog.js";
+import { taskChoices, taskMode, taskParameters, validateTask } from "../dist/task-catalog.js";
 
 const root = await fs.mkdtemp(join(tmpdir(), "lazyhb-task-catalog-"));
 try {
@@ -16,7 +16,7 @@ if(args.includes('--help')) console.log('HBuilderX isolated fixture\\nproject li
 else writeFileSync(${JSON.stringify(record)},JSON.stringify(args));\n`);
   const entry = (name, parameters = []) => `${name}\n  Fixture capability\n${parameters.map(([name, choices]) => `  --${name}  ${choices ? `取值有[${choices}]` : "Project selector"}`).join("\n")}\n`;
   const cases = [
-    ["launch web", [["ui", "true|false"], ["compile", "true|false"], ["projectPath"]]],
+    ["launch web", [["ui", "true|false"], ["compile", "true|false"], ["browser", "Built|Chrome|Firefox"], ["projectPath"]]],
     ["launch mp-future", [["ui", "0|1"], ["compile", "true"], ["prj"]]],
     ["launch quickapp-future", [["ui", "false"], ["compile", "false"]]],
     ["launch mp-no-ui", [["compile", "true"]]],
@@ -40,7 +40,16 @@ else writeFileSync(${JSON.stringify(record)},JSON.stringify(args));\n`);
     "launch web", "launch mp-future", "launch app-android", "launch app-harmony", "launch unknown",
   ]));
   const choice = (name, mode) => runs.find((item) => item.command.name === name && (!mode || item.mode === mode));
-  assert.equal(choice("launch web").mode, "compile");
+  assert.equal(choice("launch web", "run").id, "launch web:run");
+  assert.equal(choice("launch web", "run").defaults.compile, "false");
+  assert.equal(choice("launch web", "compile").defaults.compile, "true");
+  assert.equal(taskMode(choice("launch web", "run"), { compile: "false" }), "run");
+  assert.equal(taskMode(choice("launch web", "compile"), { compile: "true" }), "compile");
+  assert.ok(taskParameters(choice("launch web", "run"), {}).some((parameter) => parameter.name === "browser"));
+  assert.ok(taskParameters(choice("launch web", "compile"), {}).every((parameter) => parameter.name !== "browser"));
+  assert.ok(taskParameters(choice("launch web", "run"), {}).every((parameter) => parameter.name !== "port"), "port is project configuration, not a CLI parameter");
+  assert.throws(() => validateTask(choice("launch web", "run"), { ui: "false", compile: "true" }));
+  assert.throws(() => validateTask(choice("launch web", "run"), { ui: "false", compile: "false", browser: "Unknown" }));
   assert.equal(choice("launch app-android").mode, "compile");
   assert.equal(taskMode(choice("launch app-android"), {}), "compile");
   assert.equal(taskMode(choice("launch app-android"), { compile: "" }), "compile");
@@ -56,9 +65,20 @@ else writeFileSync(${JSON.stringify(record)},JSON.stringify(args));\n`);
   assert.equal(publish.find((item) => item.command.name === "publish future").projectParameter, undefined, "output path is not project binding");
   const target = join(root, "Project B");
   await fs.mkdir(target);
-  const web = choice("launch web");
-  assert.equal(await client.run(web.command, { ...web.defaults, [web.projectParameter]: target }, () => {}), 0);
-  assert.deepEqual(JSON.parse(await fs.readFile(record, "utf8")), ["launch", "web", "--ui", "false", "--compile", "true", "--projectPath", target]);
+  for (const mode of ["run", "compile"]) {
+    const web = choice("launch web", mode);
+    const values = { ...web.defaults, ...(mode === "run" ? { browser: "Chrome" } : {}), [web.projectParameter]: target };
+    validateTask(web, values);
+    assert.equal(await client.run(web.command, values, () => {}), 0);
+    assert.deepEqual(JSON.parse(await fs.readFile(record, "utf8")), [
+      "launch", "web", "--ui", "false", "--compile", mode === "run" ? "false" : "true",
+      ...(mode === "run" ? ["--browser", "Chrome"] : []), "--projectPath", target,
+    ]);
+  }
+  assert.throws(() => client.arguments("launch web", { ui: "false" }), /compile/);
+  assert.throws(() => client.arguments("launch web", { compile: "false" }), /ui/);
+  assert.throws(() => client.arguments("launch mp-future", { ui: "0", compile: "false" }));
+  assert.throws(() => client.arguments("launch quickapp-future", { ui: "false", compile: "false" }), /仅编译/);
   await fs.writeFile(helpFile, entry("launch app-ios", [["ui", "0"], ["iosTarget", "device|simulator"], ["project"]]));
   const revised = taskChoices(await client.discover(), "run");
   assert.equal(revised.length, 1, "refresh uses current CLI rather than stale candidates");
@@ -67,7 +87,35 @@ else writeFileSync(${JSON.stringify(record)},JSON.stringify(args));\n`);
   assert.throws(() => client.arguments(revised[0].command, { ui: "0", iosTarget: "simulator" }));
   await fs.writeFile(helpFile, entry("launch web", [["ui", "true"], ["compile", "true"]]));
   assert.ok(taskChoices(await client.discover(), "run").every((choice) => choice.unavailable));
-  console.log("PASS discovered task families, legal enum defaults, compile/run distinction, explicit project binding and executable argv");
+  for (const parameters of [
+    [["ui", "false"], ["compile", "true"]],
+    [["ui", "0"], ["compile", "true"]],
+    [["ui", "false"], ["compile"]],
+    [["ui", "false"], ["compile", "0|1"]],
+    [["ui", "false"]],
+    [["ui"], ["compile", "true|false"]],
+    [["compile", "true|false"]],
+  ]) {
+    await fs.writeFile(helpFile, entry("launch web", parameters));
+    const current = taskChoices(await client.discover(), "run");
+    assert.ok(current.some((choice) => choice.id === "launch web:run" && choice.unavailable));
+    assert.ok(current.every((choice) => choice.mode !== "run" || choice.unavailable), "unknown and compile-only help never promise Web runtime");
+    assert.throws(() => client.arguments("launch web", { ui: "false", compile: "false" }));
+    assert.throws(() => client.arguments("launch web", { ui: "false" }));
+    const compile = current.find((choice) => choice.mode === "compile" && !choice.unavailable);
+    if (compile) {
+      assert.equal(await client.run(compile.command, compile.defaults, () => {}), 0);
+      assert.deepEqual(JSON.parse(await fs.readFile(record, "utf8")), ["launch", "web", "--ui", compile.defaults.ui, "--compile", "true"]);
+    }
+  }
+  await fs.writeFile(helpFile, entry("launch web", [["ui", "0"], ["compile", "false"], ["browser", "Firefox"]]));
+  const restored = taskChoices(await client.discover(), "run").find((choice) => !choice.unavailable);
+  assert.equal(restored.id, "launch web:run");
+  assert.deepEqual(restored.defaults, { ui: "0", compile: "false" });
+  assert.deepEqual(taskParameters(restored, {}).find((parameter) => parameter.name === "browser").choices, ["Firefox"]);
+  assert.equal(await client.run(restored.command, { ...restored.defaults, browser: "Firefox" }, () => {}), 0);
+  assert.deepEqual(JSON.parse(await fs.readFile(record, "utf8")), ["launch", "web", "--ui", "0", "--compile", "false", "--browser", "Firefox"]);
+  console.log("PASS discovered task families, legal enum defaults, executable Web run/compile argv, browser choices, explicit project binding and capability refresh");
 } finally {
   await fs.rm(root, { recursive: true, force: true });
 }

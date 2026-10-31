@@ -95,10 +95,43 @@ else appendFileSync(${JSON.stringify(record)},JSON.stringify(args)+'\\n');
   }
   commands = await discover(entry("publish", [selector, ["platform", "发行平台"]]));
   assert.ok(taskChoices(commands, "publish").every(c => c.unavailable), "unverified legacy platform cannot execute guessed target");
+  commands = await discover(entry("launch web", [selector, ["ui", "取值有[true|false]"], ["compile", "取值有[true|false]"], ["browser", "取值有[Built|Chrome|Firefox|Edge|Safari]"]]));
+  choices = taskChoices(commands, "run");
+  for (const mode of ["run", "compile"]) {
+    const choice = choices.find(c => c.mode === mode && !c.unavailable);
+    const parameters = taskParameters(choice, choice.defaults);
+    assert.equal(parameters.some(p => p.name === "browser"), mode === "run");
+    assert.ok(parameters.every(p => p.name !== "port"), "Web port belongs to the project devServer configuration");
+    const args = await send(choice, mode === "run" ? { browser: "Chrome" } : {});
+    assert.equal(value(args, "ui"), "false");
+    assert.equal(value(args, "compile"), mode === "run" ? "false" : "true");
+    assert.equal(value(args, "project"), project);
+    if (mode === "run") assert.equal(value(args, "browser"), "Chrome");
+    else assert.ok(!args.includes("--browser"));
+    assert.throws(() => validateTask(choice, { ...choice.defaults, compile: mode === "run" ? "true" : "false" }));
+  }
+  commands = await discover(entry("launch web", [selector, ["ui", "取值有[0|1]"], ["compile", "取值有[true]"], ["browser", "取值有[Firefox]"]]));
+  choices = taskChoices(commands, "run");
+  assert.ok(choices.filter(c => !c.unavailable).every(c => c.mode === "compile"), "refresh to compile-only capabilities removes runtime");
+  assert.throws(() => client.arguments("launch web", { project, ui: "0", compile: "false" }));
+  const compileOnly = await send(choices.find(c => c.mode === "compile"));
+  assert.equal(value(compileOnly, "ui"), "0");
+  assert.equal(value(compileOnly, "compile"), "true");
+  commands = await discover(entry("launch web", [selector, ["ui", "取值有[false]"], ["compile", "是否仅编译，默认 false"]]));
+  assert.ok(taskChoices(commands, "run").every(c => c.unavailable), "unstructured help cannot prove Web compile semantics");
+  assert.throws(() => client.arguments("launch web", { project, ui: "false", compile: "false" }));
+  assert.throws(() => client.arguments("launch web", { project, ui: "false" }));
+  commands = await discover(entry("launch web", [selector, ["ui", "取值有[0]"], ["compile", "取值有[true|false]"], ["browser", "取值有[Firefox]"]]));
+  const restored = taskChoices(commands, "run").find(c => c.id === "launch web:run");
+  assert.deepEqual(taskParameters(restored, restored.defaults).find(p => p.name === "browser").choices, ["Firefox"]);
+  assert.throws(() => validateTask(restored, { ...restored.defaults, browser: "Chrome" }));
+  const restoredArgs = await send(restored, { browser: "Firefox" });
+  assert.equal(value(restoredArgs, "compile"), "false");
+  assert.equal(value(restoredArgs, "browser"), "Firefox");
   commands = await discover(entry("launch web", [selector, ["ui", "取值有[true]"], ["compile", "取值有[true|false]"]]));
   assert.ok(taskChoices(commands, "run").every(c => c.unavailable), "capability refresh cannot retain prior runnable mode");
   assert.throws(() => client.arguments("publish app-android", { project, type: "wgt" }));
-  console.log("PASS workflow consumer: duplicate artifact modes, real argv, project-bound management, upload conditions, required fields and capability refresh including legacy help");
+  console.log("PASS workflow consumer: artifact modes, Web run/compile argv and browser refresh, project-bound management, upload conditions, required fields and legacy help");
 } finally {
   await fs.rm(root, { recursive: true, force: true });
 }

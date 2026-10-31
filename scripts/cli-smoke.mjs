@@ -41,6 +41,7 @@ try {
   console.log("PASS explicit CLI isolation, PATH names/relative/empty entries, environment override");
   const probe = join(root, "cli-probe.mjs");
   const record = join(root, "used-config");
+  const webRecord = join(root, "web-argv.json");
   await fs.writeFile(
     probe,
     `
@@ -57,6 +58,8 @@ else if (process.argv[2] === 'pack') {
   process.stdout.write('x'.repeat(65537) + settings.android.certpassword.slice(0, 16) + String.fromCharCode(27) + '[');
   await Bun.sleep(25);
   console.log('31m' + settings.android.certpassword.slice(16));
+} else if (process.argv[2] === 'launch' && process.argv[3] === 'web') {
+  writeFileSync(${JSON.stringify(webRecord)}, JSON.stringify(process.argv.slice(2)));
 } else process.exit(34);
 `,
   );
@@ -66,6 +69,11 @@ else if (process.argv[2] === 'pack') {
     client.arguments("launch web", { ui: "true", compile: "true" }),
   );
   assert.throws(() => client.arguments("launch web", { ui: "false" }));
+  assert.throws(() => client.arguments("launch web", { compile: "false" }));
+  for (const compile of ["false", "true"]) {
+    assert.equal(await client.run("launch web", { ui: "false", compile }, () => {}), 0);
+    assert.deepEqual(JSON.parse(await fs.readFile(webRecord, "utf8")), ["launch", "web", "--ui", "false", "--compile", compile]);
+  }
   const lines = [];
   const code = await client.run(
     "pack",
