@@ -2,6 +2,7 @@ import {
   BoxRenderable,
   TextRenderable,
   TextareaRenderable,
+  InputRenderable,
   ImageRenderable,
   ScrollBoxRenderable,
   resolveImageRenderProtocol,
@@ -24,6 +25,9 @@ export interface Entry {
   description?: string;
   multiline?: boolean;
   secret?: boolean;
+  choices?: readonly string[];
+  allowOmit?: boolean;
+  defaultValue?: string;
 }
 export interface FileChoiceRow {
   value: string;
@@ -245,16 +249,18 @@ export class Dialogs {
   }
   async choice<T extends string>(
     title: string,
-    options: { value: T; label: string; description?: string }[],
+    options: { value: T; label: string; description?: string; disabledReason?: string }[],
     summary?: string,
+    searchable = false,
   ): Promise<T | undefined> {
     if (!options.length) return undefined;
     const { promise, resolve: finish } = Promise.withResolvers<T | undefined>();
     const { box, error } = this.frame(title);
+    if (searchable) { box.top = "12%"; box.height = "75%"; error.height = 1; }
     let summaryView: ScrollBoxRenderable | undefined;
     if (summary) {
       summaryView = new ScrollBoxRenderable(this.renderer, {
-        id: "choice-summary", height: "35%", minHeight: 3, flexShrink: 1,
+        id: "choice-summary", height: searchable ? 3 : "35%", minHeight: searchable ? 2 : 3, flexShrink: 1,
         scrollX: false, scrollY: true, contentOptions: { flexDirection: "column" },
       });
       summaryView.focusable = true;
@@ -264,11 +270,29 @@ export class Dialogs {
       });
       box.add(summaryView);
     }
+    let search: InputRenderable | undefined;
+    if (searchable) {
+      search = new InputRenderable(this.renderer, {
+        id: "choice-search", placeholder: "输入名称、分组或命令筛选…", marginBottom: 1, flexShrink: 0,
+        backgroundColor: this.theme.inputBackground, focusedBackgroundColor: this.theme.inputBackground,
+        textColor: this.theme.foreground, focusedTextColor: this.theme.foreground,
+        selectionBg: this.theme.selectedBackground, selectionFg: this.theme.selectedForeground,
+        cursorColor: this.theme.accent,
+        keyBindings: [{ name: "a", ctrl: true, action: "select-all" }],
+      });
+      this.themeUpdates.push(() => {
+        search!.backgroundColor = search!.focusedBackgroundColor = this.theme.inputBackground;
+        search!.textColor = search!.focusedTextColor = this.theme.foreground;
+        search!.selectionBg = this.theme.selectedBackground; search!.selectionFg = this.theme.selectedForeground;
+        search!.cursorColor = this.theme.accent;
+      });
+      box.add(search);
+    }
     const list = new CompactSelectRenderable(this.renderer, {
+      id: searchable ? "choice-results" : undefined,
       options: options.map((item) => ({
-        name: item.label,
-        description: item.description ?? "",
-        value: item.value,
+        name: item.label, value: item.value,
+        description: item.disabledReason ? `不可用：${item.disabledReason}` : item.description ?? "",
       })),
       flexGrow: 1, minHeight: Math.min(4, options.length * 2),
       showDescription: true,
@@ -293,13 +317,33 @@ export class Dialogs {
       list.selectedDescriptionColor = this.theme.selectedForeground;
     });
     box.add(list);
+    if (search) {
+      const index = options.map((item) => ({
+        item, text: `${item.label} ${item.description ?? ""} ${item.value}`.normalize("NFKC").toLowerCase(),
+      }));
+      search.on("input", () => {
+        const selected = list.getSelectedOption()?.value;
+        const tokens = search!.value.normalize("NFKC").toLowerCase().trim().split(/\s+/).filter(Boolean);
+        const matches = index.filter(({ text }) => tokens.every((token) => text.includes(token))).map(({ item }) => item);
+        list.options = matches.map((item) => ({
+          name: item.label, value: item.value,
+          description: item.disabledReason ? `不可用：${item.disabledReason}` : item.description ?? "",
+        }));
+        list.setSelectedIndex(Math.max(0, matches.findIndex((item) => item.value === selected)));
+        error.content = matches.length ? "" : "没有匹配操作；清空搜索可恢复全部操作。";
+      });
+    }
     box.add(error);
     const submit = () => {
       const value = list.getSelectedOption()?.value as T | undefined;
+      if (value === undefined) return;
+      const unavailable = options.find((item) => item.value === value)?.disabledReason;
+      if (unavailable) { error.content = unavailable; return; }
       this.close();
       finish(value);
     };
     list.on("itemSelected", submit);
+    search?.on("enter", submit);
     list.onMouseDown = (event) => {
       if (event.button !== 0 || event.x < list.x || event.x >= list.x + list.width) return;
       // This dialog uses two fixed rows per item (name + description), no font or spacing.
@@ -316,16 +360,21 @@ export class Dialogs {
     };
     box.add(
       this.createText({
-        content: summary ? "↑↓ 选择 · Enter 确认 · Tab 摘要 · PgUp/PgDn 滚动 · Esc 取消" : "↑↓ 选择 · Enter 确认 · Escape 取消",
+        content: searchable ? "输入筛选 · ↑↓ 选择 · Enter 执行 · Tab 切换 · Esc 返回" : summary ? "↑↓ 选择 · Enter 确认 · Tab 摘要 · PgUp/PgDn 滚动 · Esc 取消" : "↑↓ 选择 · Enter 确认 · Escape 取消",
         height: 1,
       }, "muted"),
     );
     const ok = this.button(box, "确认", submit);
     this.modal = {
       box,
-      focus: summaryView ? [list, summaryView, ok] : [list, ok],
+      focus: [...(search ? [search] : []), list, ...(summaryView ? [summaryView] : []), ok],
       submit,
       key: (key) => {
+        if (search?.focused && !key.ctrl && !key.meta && !key.option && ["up", "down"].includes(key.name)) {
+          list.setSelectedIndex(Math.max(0, Math.min(list.options.length - 1,
+            list.getSelectedIndex() + (key.name === "up" ? -1 : 1))));
+          return true;
+        }
         if (!summaryView || (!summaryView.focused && !["pageup", "pagedown"].includes(key.name))) return false;
         const amount = ["up", "k"].includes(key.name) ? -1 : ["down", "j"].includes(key.name) ? 1
           : key.name === "pageup" ? -Math.max(1, summaryView.viewport.height - 1)
@@ -341,7 +390,7 @@ export class Dialogs {
         finish(undefined);
       },
     };
-    list.focus();
+    (search ?? list).focus();
     return promise;
   }
   async fileChoice(
@@ -557,6 +606,13 @@ export class Dialogs {
       fg: this.theme.foreground,
       bg: this.theme.inputBackground,
     });
+    const selector = new CompactSelectRenderable(this.renderer, {
+      id: "form-enum", flexGrow: 1, minHeight: 1, showDescription: false, showScrollIndicator: true,
+      backgroundColor: this.theme.surface, textColor: this.theme.foreground,
+      focusedBackgroundColor: this.theme.surface, focusedTextColor: this.theme.foreground,
+      selectedBackgroundColor: this.theme.selectedBackground, selectedTextColor: this.theme.selectedForeground,
+    });
+    selector.visible = false;
     this.themeUpdates.push(() => {
       editor.backgroundColor = this.theme.inputBackground;
       editor.textColor = this.theme.foreground;
@@ -567,12 +623,17 @@ export class Dialogs {
       editor.cursorColor = this.theme.accent;
       password.fg = this.theme.foreground;
       password.bg = this.theme.inputBackground;
+      selector.backgroundColor = selector.focusedBackgroundColor = this.theme.surface;
+      selector.textColor = selector.focusedTextColor = this.theme.foreground;
+      selector.selectedBackgroundColor = this.theme.selectedBackground;
+      selector.selectedTextColor = this.theme.selectedForeground;
     });
     password.focusable = true;
     password.visible = false;
     box.add(label);
     box.add(editor);
     box.add(password);
+    box.add(selector);
     box.add(error);
     const values = Object.fromEntries(
       entries.map((entry) => [entry.key, entry.value ?? ""]),
@@ -580,28 +641,51 @@ export class Dialogs {
     const store = () => {
       const entry = entries[index];
       if (entry)
-        values[entry.key] = entry.secret ? password.value : editor.plainText;
+        values[entry.key] = entry.secret ? password.value : entry.choices?.length
+          ? String(selector.getSelectedOption()?.value ?? "") : editor.plainText;
     };
     const show = () => {
       const entry = entries[index];
       label.content = entry
         ? `${index + 1}/${entries.length} ${entry.label}\n${entry.description ?? ""}${entry.secret ? "\n凭据已遮罩；Ctrl+U 清空，支持粘贴" : ""}`
         : "无参数，Ctrl+S 继续";
-      editor.visible = !entry?.secret;
+      const enumerated = !!entry?.choices?.length && !entry.secret;
+      editor.visible = !entry?.secret && !enumerated;
       password.visible = !!entry?.secret;
-      editor.setText(entry && !entry.secret ? values[entry.key] : "");
+      selector.visible = enumerated;
+      if (enumerated) {
+        selector.options = [
+          { name: entry.allowOmit === false ? "请选择…" : `使用 CLI / 项目默认值${entry.defaultValue ? "（" + entry.defaultValue + "）" : ""}`, value: "", description: "" },
+          ...entry.choices!.map((value) => ({ name: value, value, description: "" })),
+        ];
+        selector.setSelectedIndex(Math.max(0, selector.options.findIndex((option) => option.value === values[entry.key])));
+      }
+      editor.setText(entry && !entry.secret && !enumerated ? values[entry.key] : "");
       password.value = entry?.secret ? values[entry.key] : "";
     };
-    const focusEditor = () =>
-      (entries[index]?.secret ? password : editor).focus();
+    const focusEditor = () => {
+      const entry = entries[index];
+      const control = entry?.secret ? password : entry?.choices?.length ? selector : editor;
+      if (this.modal) this.modal.focus[0] = control;
+      control.focus();
+    };
     const step = (delta: number) => {
       if (!entries.length) return;
       store();
       index = (index + delta + entries.length) % entries.length;
       show();
-      if (this.modal)
-        this.modal.focus[0] = entries[index].secret ? password : editor;
+      error.content = "";
       focusEditor();
+    };
+    selector.on("itemSelected", () => step(1));
+    selector.onMouseDown = (event) => {
+      if (event.button !== 0) return;
+      const row = event.y - selector.y, height = selector.height;
+      if (row < 0 || row >= height || event.x < selector.x || event.x >= selector.x + selector.width) return;
+      const offset = Math.max(0, Math.min(selector.getSelectedIndex() - Math.floor(height / 2), selector.options.length - height));
+      if (offset + row >= selector.options.length) return;
+      event.preventDefault(); event.stopPropagation();
+      selector.setSelectedIndex(offset + row); selector.focus();
     };
     let submitting = false;
     let closed = false;
@@ -610,6 +694,11 @@ export class Dialogs {
       store();
       submitting = true;
       try {
+        for (const entry of entries) {
+          if (!entry.secret && entry.choices?.length &&
+            (values[entry.key] === "" ? entry.allowOmit === false : !entry.choices.includes(values[entry.key])))
+            throw new Error(`${entry.label}：请选择允许的值`);
+        }
         await validate?.(values);
         if (closed || this.modal?.box !== box) return;
         closed = true;
@@ -629,7 +718,7 @@ export class Dialogs {
     box.add(
       this.createText({
         content:
-          "Alt+↑/↓ 上/下一字段 · Tab 切换按钮 · Ctrl+S 应用 · Escape 取消",
+          "枚举：↑↓ 选择 / Enter 下一字段 · Alt+↑↓ 切字段 · Ctrl+S 应用 · Esc 取消",
         height: 2,
       }, "muted"),
     );
@@ -666,7 +755,6 @@ export class Dialogs {
       },
     };
     show();
-    this.modal.focus[0] = entries[index]?.secret ? password : editor;
     focusEditor();
     return promise;
   }
