@@ -1,6 +1,6 @@
 {
   "name": "lazyhb",
-  "version": "0.2.2",
+  "version": "0.2.3",
   "description": "HBuilderX terminal workspace using Bun and OpenTUI",
   "type": "module",
   "engines": {
@@ -9,7 +9,15 @@
   "bin": {
     "lazyhb": "bin/lazyhb.mjs"
   },
-  "files": ["bin", "dist", "native", "README.md", "docs/cli-capabilities.md", "docs/run-publish-workflows.md", "docs/manifest-config-audit.md"],
+  "files": [
+    "bin",
+    "dist",
+    "native",
+    "README.md",
+    "docs/cli-capabilities.md",
+    "docs/run-publish-workflows.md",
+    "docs/manifest-config-audit.md"
+  ],
   "packageManager": "bun@1.4.2",
   "scripts": {
     "build": "bun --bun ./node_modules/typescript/bin/tsc",
