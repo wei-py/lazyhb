@@ -1,7 +1,7 @@
 import type { Category } from "./catalog.js";
 
 export const categoryTabs = ["常规", "App", "平台"] as const;
-export const contentTabs = ["3 字段", "4 操作", "日志"] as const;
+export const workspacePages = ["概览", "配置", "任务日志"] as const;
 
 export interface CategoryDomain {
   key: string;

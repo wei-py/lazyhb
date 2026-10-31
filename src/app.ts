@@ -49,11 +49,12 @@ import { Dialogs, type Entry } from "./dialogs.js";
 import { resolveTheme, themeLabel, THEME_CHOICES, type Theme } from "./theme.js";
 import { loadSettings, saveSettings, type Settings } from "./settings.js";
 import { HelpOverlay, SettingsOverlay } from "./overlays.js";
-import { categoryDomains, categoryTabs, contentTabs } from "./navigation.js";
+import { categoryDomains, categoryTabs, workspacePages } from "./navigation.js";
 import { loadFileIcon, fileTypeLabel } from "./file-icons.js";
 import { decodeProjectImage, isPreviewImage } from "./image-preview.js";
 import { tableRow, fieldColumns, actionColumns } from "./checklist.js";
 import { taskChoices, taskMode, taskParameters, validateTask, type TaskChoice, type TaskKind } from "./task-catalog.js";
+import { TaskRunner, type TaskRecord } from "./task-runner.js";
 
 const MISSING = Symbol("missing manifest field");
 const actionGroups = [
@@ -111,6 +112,7 @@ export class Workspace {
   private stopping?: Promise<void>;
   private taskName = "";
   private blockedNotice = false;
+  private blockedReason = "";
   private cliChoice?: string;
   private cliSource = "自动发现";
   private connectedSource = "";
@@ -123,33 +125,47 @@ export class Workspace {
   private dialogs: Dialogs;
   private title: TextRenderable;
   private status: TextRenderable;
-  private logView: TextRenderable;
   private projectList: SelectRenderable;
+  private pageList: SelectRenderable;
   private groupList: SelectRenderable;
   private fieldList: SelectRenderable;
   private actionList: SelectRenderable;
+  private taskList: SelectRenderable;
   private fullLogList: SelectRenderable;
   private contentBox: BoxRenderable;
+  private overview: BoxRenderable;
+  private overviewDetails: TextRenderable;
+  private configView: BoxRenderable;
+  private categoryPanel: BoxRenderable;
   private fieldView: BoxRenderable;
-  private mainTabs: TextRenderable[] = [];
-  private actionView: BoxRenderable;
+  private logsView: BoxRenderable;
+  private taskPanel: BoxRenderable;
+  private outputPanel: BoxRenderable;
+  private taskDetails: TextRenderable;
   private fieldHeader: TextRenderable;
   private actionHeader: TextRenderable;
-  private actionDetail: TextRenderable;
-  private actionTabs: TextRenderable[] = [];
-  private actionGroup = 0;
-  private groupHeaders: TextRenderable[] = [];
-  private logHeader: TextRenderable;
+  private taskStopControl: TextRenderable;
   private groupTabs: TextRenderable[] = [];
   private labelBackgrounds = new Map<TextRenderable, BoxRenderable>();
   private taskControl: TextRenderable;
-  private selectedNavigation: 0 | 1 = 1;
+  private moreControl: TextRenderable;
   private collapsedDomains = new Set<string>();
   private categoryTab = 0;
   private categorySelections = ["basic", "", ""];
   private categoryCursors = ["basic", "", ""];
-  private contentTab = 0;
-  private logCollapsed = false;
+  private page = 0;
+  private selectedTaskId = 0;
+  private logPositions = new Map<number, number>();
+  private displayedLogId = 0;
+  private displayedLines: readonly string[] = [];
+  private displayedLineCount = -1;
+  private displayedLastLine = "";
+  private runner = new TaskRunner(() => {
+    if (this.disposed) return;
+    if (!this.runner.active) this.blockedNotice = false;
+    this.refreshTasks();
+    this.updateStatus();
+  });
   private focus: Renderable[];
   private root: BoxRenderable;
   private sidebar: BoxRenderable;
@@ -157,10 +173,8 @@ export class Workspace {
   private panels: BoxRenderable[];
   private detailBox: BoxRenderable;
   private detail: TextRenderable;
-  private logBox: BoxRenderable;
-  private logLines = 3;
   private footer: TextRenderable;
-  private activePanel = 1;
+  private activePanel = 2;
   private settings: Settings = loadSettings();
   private theme: Theme;
   private terminalMode: ThemeMode | null;
@@ -177,7 +191,7 @@ export class Workspace {
   private readonly destroyHandler = () => {
     this.disposed = true;
     this.connectionAbort?.abort();
-    void Promise.all([this.client?.cancel(), this.pendingClient?.cancel(), this.stopping])
+    void Promise.all([this.runner.stopAll(), this.client?.cancel(), this.pendingClient?.cancel(), this.stopping])
       .catch((error) => { process.stderr.write("停止本地 CLI 进程树失败：" + String(error) + "\n"); });
     this.removeListeners();
   };
@@ -221,164 +235,123 @@ export class Workspace {
       id: "workspace-title", content: "", height: 2, flexGrow: 1, minWidth: 0, wrapMode: "none",
     });
     header.add(this.title);
+    this.moreControl = new TextRenderable(renderer, { id: "workspace-more", content: "[操作 m]", width: 10, height: 2, flexShrink: 0 });
+    this.moreControl.onMouseDown = (event) => {
+      event.preventDefault(); event.stopPropagation();
+      void this.perform("more");
+    };
+    header.add(this.moreControl);
     this.taskControl = new TextRenderable(renderer, {
-      id: "task-control", content: "", height: 2, width: 26, flexShrink: 0, visible: false, wrapMode: "none",
+      id: "task-control", content: "", height: 2, width: 26, flexShrink: 0, wrapMode: "none",
     });
     this.taskControl.onMouseDown = (event) => {
       event.preventDefault(); event.stopPropagation();
-      void this.stopTask();
+      if (!this.navigationLocked()) this.switchPage(2);
     };
     header.add(this.taskControl);
-    const body = new BoxRenderable(renderer, {
-      flexDirection: "row",
-      flexGrow: 1,
-      minHeight: 3,
-    });
+    const body = new BoxRenderable(renderer, { flexDirection: "row", flexGrow: 1, minHeight: 3 });
     this.root.add(body);
-    this.sidebar = new BoxRenderable(renderer, {
-      width: "30%",
-      minWidth: 18,
-      flexShrink: 0,
-      flexDirection: "column",
-    });
+    this.sidebar = new BoxRenderable(renderer, { width: 24, minWidth: 16, flexShrink: 0, flexDirection: "column" });
     body.add(this.sidebar);
-    const projects = this.panel("");
-    projects.focusable = true;
+    const projects = this.panel("项目");
+    projects.flexGrow = 1;
     this.sidebar.add(projects);
     this.projectList = this.list({ id: "projects", flexGrow: 1 });
     projects.add(this.projectList);
-    const groups = this.panel("");
-    groups.focusable = true;
-    groups.flexGrow = 1;
-    this.sidebar.add(groups);
-    this.groupList = this.list({ id: "categories", flexGrow: 1 });
-    groups.add(this.groupList);
-    this.main = new BoxRenderable(renderer, {
-      flexDirection: "column",
-      flexGrow: 1,
-      minWidth: 0,
-    });
+    const pages = this.panel("工作台");
+    pages.height = 6; pages.flexShrink = 0;
+    this.sidebar.add(pages);
+    this.pageList = this.list({ id: "workspace-pages", flexGrow: 1 });
+    this.pageList.options = workspacePages.map((name, value) => ({ name, value, description: "" }));
+    pages.add(this.pageList);
+    this.main = new BoxRenderable(renderer, { flexDirection: "column", flexGrow: 1, minWidth: 0 });
     body.add(this.main);
-    this.contentBox = this.panel("");
+    this.contentBox = this.panel("项目概览");
     this.contentBox.flexGrow = 1;
-    this.contentBox.minHeight = 5;
     this.main.add(this.contentBox);
-    this.fieldView = new BoxRenderable(renderer, {
-      flexDirection: "column", flexGrow: 1, minHeight: 0,
-    });
-    this.contentBox.add(this.fieldView);
-    const fields = new BoxRenderable(renderer, {
-      flexDirection: "column", flexGrow: 1, minHeight: 1,
-    });
-    this.fieldView.add(fields);
+    this.overview = new BoxRenderable(renderer, { flexDirection: "column", flexGrow: 1, minHeight: 0 });
+    this.contentBox.add(this.overview);
+    this.overviewDetails = new TextRenderable(renderer, { id: "project-overview", height: 9, flexShrink: 0, wrapMode: "word" });
+    this.overview.add(this.overviewDetails);
+    this.actionHeader = new TextRenderable(renderer, { id: "actions-header", height: 1, flexShrink: 0, wrapMode: "none" });
+    this.overview.add(this.actionHeader);
+    this.actionList = this.list({ id: "overview-actions", flexGrow: 1 });
+    this.overview.add(this.actionList);
+    this.configView = new BoxRenderable(renderer, { flexDirection: "row", flexGrow: 1, minHeight: 0 });
+    this.contentBox.add(this.configView);
+    this.categoryPanel = this.panel("配置");
+    this.categoryPanel.width = 23; this.categoryPanel.flexShrink = 0;
+    this.configView.add(this.categoryPanel);
+    this.groupList = this.list({ id: "categories", flexGrow: 1 });
+    this.categoryPanel.add(this.groupList);
+    this.groupTabs = categoryTabs.map((label, index) =>
+      this.borderLabel(this.categoryPanel, label, index * 6, 6, () => this.switchCategoryTab(index)));
+    this.fieldView = new BoxRenderable(renderer, { flexDirection: "column", flexGrow: 1, minHeight: 0, minWidth: 0 });
+    this.configView.add(this.fieldView);
     this.fieldHeader = new TextRenderable(renderer, { id: "fields-header", height: 1, flexShrink: 0, wrapMode: "none" });
-    fields.add(this.fieldHeader);
+    this.fieldView.add(this.fieldHeader);
     this.fieldList = this.list({ id: "fields", flexGrow: 1 });
-    fields.add(this.fieldList);
+    this.fieldView.add(this.fieldList);
     this.detailBox = this.panel("字段详情");
     this.detailBox.flexShrink = 0;
     this.fieldView.add(this.detailBox);
-    this.detail = new TextRenderable(renderer, {
-      id: "field-details",
-      content: "",
-      flexGrow: 1,
-      wrapMode: "word",
-    });
+    this.detail = new TextRenderable(renderer, { id: "field-details", flexGrow: 1, wrapMode: "word" });
     this.detailBox.add(this.detail);
-    const operations = new BoxRenderable(renderer, {
-      flexDirection: "column", flexGrow: 1, minHeight: 0,
-    });
-    this.contentBox.add(operations);
-    this.actionView = operations;
-    const actionTabs = new BoxRenderable(renderer, { height: 1, flexShrink: 0, flexDirection: "row" });
-    operations.add(actionTabs);
-    this.actionTabs = actionGroups.map((group, index) => {
-      const background = new BoxRenderable(renderer, { width: 7, height: 1, flexShrink: 0 });
-      const tab = new TextRenderable(renderer, { content: ` ${group.title} `, width: "100%", height: 1 });
-      background.add(tab);
-      this.labelBackgrounds.set(tab, background);
-      tab.onMouseDown = (event) => {
-        event.preventDefault(); event.stopPropagation();
-        if (!this.navigationLocked()) this.switchActionGroup(index);
-      };
-      actionTabs.add(background);
-      return tab;
-    });
-    this.actionHeader = new TextRenderable(renderer, { id: "actions-header", height: 1, flexShrink: 0, wrapMode: "none" });
-    operations.add(this.actionHeader);
-    this.actionList = this.list({ id: "actions", flexGrow: 1 });
-    operations.add(this.actionList);
-    this.actionDetail = new TextRenderable(renderer, { id: "action-details", height: 4, flexShrink: 0, wrapMode: "word" });
-    operations.add(this.actionDetail);
+    this.logsView = new BoxRenderable(renderer, { flexDirection: "row", flexGrow: 1, minHeight: 0 });
+    this.contentBox.add(this.logsView);
+    this.taskPanel = this.panel("任务 / 服务");
+    this.taskPanel.width = 25; this.taskPanel.flexShrink = 0;
+    this.logsView.add(this.taskPanel);
+    this.taskList = this.list({ id: "task-records", flexGrow: 1, showDescription: true });
+    this.taskList.onMouseDown = (event) => {
+      if (event.button !== 0 || this.navigationLocked()) return;
+      const row = Math.floor((event.y - this.taskList.y) / 2);
+      const capacity = Math.max(1, Math.floor(this.taskList.height / 2));
+      if (row < 0 || row >= capacity || event.x < this.taskList.x || event.x >= this.taskList.x + this.taskList.width) return;
+      const offset = Math.max(0, Math.min(this.taskList.getSelectedIndex() - Math.floor(capacity / 2), this.taskList.options.length - capacity));
+      const index = offset + row;
+      if (index >= this.taskList.options.length) return;
+      event.preventDefault(); event.stopPropagation();
+      this.taskList.setSelectedIndex(index);
+      this.taskList.focus();
+    };
+    this.taskPanel.add(this.taskList);
+    this.outputPanel = this.panel("所选任务输出");
+    this.outputPanel.flexGrow = 1;
+    this.logsView.add(this.outputPanel);
+    this.taskDetails = new TextRenderable(renderer, { id: "selected-task-status", height: 4, flexShrink: 0, wrapMode: "word" });
+    this.outputPanel.add(this.taskDetails);
+    const stopSelected = new TextRenderable(renderer, { id: "stop-selected-task", content: "[停止此任务 Ctrl+K]", height: 1, flexShrink: 0 });
+    stopSelected.onMouseDown = (event) => {
+      event.preventDefault(); event.stopPropagation();
+      if (!this.navigationLocked()) void this.stopTask();
+    };
+    this.outputPanel.add(stopSelected);
+    this.taskStopControl = stopSelected;
+    this.fullLogList = this.list({ id: "task-output", flexGrow: 1 });
+    this.outputPanel.add(this.fullLogList);
     this.fieldList.onSizeChange = () => this.formatFields();
     this.actionList.onSizeChange = () => this.formatActions();
-    this.status = new TextRenderable(renderer, {
-      id: "workspace-status",
-      content: "",
-      height: 1,
-      flexShrink: 0,
-      wrapMode: "none",
-    });
+    this.status = new TextRenderable(renderer, { id: "workspace-status", height: 1, flexShrink: 0, wrapMode: "none" });
     this.root.add(this.status);
-    this.logBox = this.panel("");
-    this.logBox.focusable = true;
-    this.logBox.flexShrink = 0;
-    this.logView = new TextRenderable(renderer, {
-      id: "workspace-logs",
-      content: "",
-      flexGrow: 1,
-      wrapMode: "none",
-    });
-    this.logBox.add(this.logView);
-    this.main.add(this.logBox);
-    this.fullLogList = this.list({ id: "full-logs", flexGrow: 1 });
-    this.contentBox.add(this.fullLogList);
-    this.footer = new TextRenderable(renderer, {
-      id: "workspace-footer",
-      content: "",
-      height: 2,
-      flexShrink: 0,
-      wrapMode: "none",
-    });
+    this.footer = new TextRenderable(renderer, { id: "workspace-footer", height: 2, flexShrink: 0, wrapMode: "none" });
     this.root.add(this.footer);
-    this.focus = [
-      this.projectList, this.groupList, this.fieldList, this.actionList, this.fullLogList,
-    ];
-    this.panels = [projects, groups, this.contentBox];
+    this.focus = [this.projectList, this.pageList, this.actionList, this.groupList, this.fieldList, this.taskList, this.fullLogList];
+    this.panels = [projects, pages, this.contentBox, this.categoryPanel, this.taskPanel, this.outputPanel];
     this.dialogs = new Dialogs(renderer, () => this.restoreFocus(), this.theme);
-    this.mainTabs = contentTabs.map((label, index) =>
-      this.borderLabel(this.contentBox, label, [0, 9, 18][index], index === 2 ? 6 : 9, () => this.switchContentTab(index)));
-    this.groupTabs = categoryTabs.map((label, index) =>
-      this.borderLabel(groups, label, [4, 10, 16][index], index === 1 ? 6 : 6, () => this.switchCategoryTab(index)));
-    this.groupHeaders = [
-      this.borderLabel(projects, "", 0, 20, () => this.focusPanel(0)),
-      this.borderLabel(groups, "", 0, 4, () => this.focusPanel(1)),
-    ];
-    this.logHeader = this.borderLabel(this.logBox, "", 0, 25, () => {
-      this.logCollapsed = !this.logCollapsed;
-      this.resizeLayout();
-    });
-    [projects, groups].forEach((panel, index) => {
-      panel.on("focused", () => {
-        if (this.navigationLocked()) return;
-        this.selectNavigation(index as 0 | 1);
-        this.activePanel = index; this.resizeLayout();
-      });
-    });
-    this.logBox.on("focused", () => {
-      if (this.navigationLocked()) return;
-      this.activePanel = 5; this.resizeLayout();
-    });
     this.focus.forEach((list, index) => {
       list.on("focused", () => {
         if (this.navigationLocked()) return;
         this.activePanel = index;
-        if (index < 2) this.selectNavigation(index as 0 | 1);
         this.updatePanelFocus();
-        this.resizeLayout();
       });
       list.on("blurred", () => this.updatePanelFocus());
     });
+    this.pageList.on("selectionChanged", () => {
+      if (!this.refreshing && !this.navigationLocked())
+        this.switchPage(Number(this.pageList.getSelectedOption()?.value ?? 0), false);
+    });
+    this.pageList.on("itemSelected", () => this.focusPanel(this.currentMainPanel()));
     this.projectList.on("itemSelected", () => {
       const item = this.projectList.getSelectedOption()?.value as string | undefined;
       if (item) void this.switchProject(item);
@@ -406,15 +379,13 @@ export class Workspace {
       const key = this.groupList.getSelectedOption()?.value as string | undefined;
       if (key?.startsWith("@")) { this.toggleDomain(key.slice(1)); return; }
       if (this.group === "source") void this.perform("source");
-      else this.focusPanel(2);
+      else this.focusPanel(4);
     });
     this.groupList.onMouseUp = (event) => {
       if (this.navigationLocked() || this.resourceBusy || event.button !== 0) return;
       const row = event.y - this.groupList.y;
       const height = this.groupList.height;
       if (row < 0 || row >= height || event.x < this.groupList.x || event.x >= this.groupList.x + this.groupList.width) return;
-      // Select 0.7 exposes selection but not its centered viewport offset.
-      // These lists have one row per option (no descriptions or item spacing).
       const offset = Math.max(0, Math.min(this.groupList.getSelectedIndex() - Math.floor(height / 2), this.groupList.options.length - height));
       const index = offset + row;
       const key = this.groupList.options[index]?.value as string | undefined;
@@ -422,12 +393,17 @@ export class Workspace {
       this.groupList.setSelectedIndex(index);
       if (key.startsWith("@")) this.toggleDomain(key.slice(1));
     };
-    this.fieldList.on("itemSelected", () => void this.perform("edit"));
-    this.actionList.on("itemSelected", () => {
-      void this.perform(this.actionList.getSelectedOption()?.value as string);
+    this.taskList.on("selectionChanged", () => {
+      if (this.refreshing) return;
+      this.logPositions.set(this.selectedTaskId, this.fullLogList.getSelectedIndex());
+      this.selectedTaskId = Number(this.taskList.getSelectedOption()?.value ?? 0);
+      this.refreshTaskOutput();
+      this.updateTaskControl();
     });
+    this.taskList.on("itemSelected", () => this.focusPanel(6));
+    this.fieldList.on("itemSelected", () => void this.perform("edit"));
+    this.actionList.on("itemSelected", () => void this.perform(String(this.actionList.getSelectedOption()?.value)));
     this.fieldList.on("selectionChanged", () => this.updateStatus());
-    this.actionList.on("selectionChanged", () => this.updateActionDetail());
     renderer.keyInput.on("keypress", this.keyHandler);
     renderer.on("resize", this.resizeHandler);
     renderer.on("frame", this.tableLayoutHandler);
@@ -480,28 +456,25 @@ export class Workspace {
     };
     return label;
   }
-  private currentMainPanel(): number { return this.contentTab + 2; }
-  private selectNavigation(index: 0 | 1): void {
-    this.selectedNavigation = index;
-  }
+  private currentMainPanel(): number { return this.page === 0 ? 2 : this.page === 1 ? 4 : 6; }
   private restoreFocus(): void {
     if (this.disposed) return;
     this.resizeLayout();
-    const target = this.activePanel === 5 ? this.logBox : this.focus[this.activePanel];
-    target.focus();
+    this.focus[this.activePanel].focus();
     this.updatePanelFocus();
   }
   private focusPanel(index: number): void {
-    if (index < 2) {
-      this.selectNavigation(index as 0 | 1);
-    } else if (index < 5) this.contentTab = index - 2;
     this.activePanel = index;
     this.restoreFocus();
   }
-  private switchContentTab(index: number): void {
-    this.contentTab = index;
-    this.activePanel = index + 2;
-    this.restoreFocus();
+  private switchPage(index: number, focus = true): void {
+    this.page = index;
+    this.refreshing = true;
+    this.pageList.setSelectedIndex(index);
+    this.refreshing = false;
+    this.activePanel = focus ? this.currentMainPanel() : 1;
+    this.resizeLayout();
+    if (focus) this.restoreFocus();
   }
   private switchCategoryTab(index: number): void {
     if (this.resourceBusy) return;
@@ -510,7 +483,8 @@ export class Workspace {
     const selected = this.categorySelections[index] || domains[0]?.categories[0]?.key;
     if (selected) this.group = selected;
     this.refreshFields();
-    this.focusPanel(1);
+    this.page = 1;
+    this.focusPanel(3);
   }
   private toggleDomain(key: string): void {
     if (this.resourceBusy) return;
@@ -520,38 +494,24 @@ export class Workspace {
     this.refreshCategoryList("@" + key);
   }
   private cycleFocus(delta: number): void {
-    const available = [0, 1];
-    available.push(this.currentMainPanel());
-    if (this.contentTab !== 2) available.push(5);
+    const available = [0, 1, ...(this.page === 0 ? [2] : this.page === 1 ? [3, 4] : [5, 6])];
     const position = available.indexOf(this.activePanel);
-    const next = available[(position + delta + available.length) % available.length];
-    this.focusPanel(next);
+    this.focusPanel(available[(position + delta + available.length) % available.length]);
   }
   private updatePanelFocus(): void {
-    const unlocked = !this.navigationLocked();
     if (this.disposed) return;
+    const unlocked = !this.navigationLocked();
+    const owners = [0, 1, this.currentMainPanel(), 3, 5, 6];
     this.panels.forEach((panel, index) => {
-      const focused = (index === 2 ? this.activePanel >= 2 && this.activePanel < 5 : index === this.activePanel) && unlocked;
-      panel.borderColor = focused ? this.theme.accent : this.theme.border;
+      panel.borderColor = unlocked && this.activePanel === owners[index] ? this.theme.accent : this.theme.border;
     });
-    this.groupHeaders[0].content = `${this.selectedNavigation === 0 ? "▾" : "▸"} 1 项目 (${this.projects.length})`;
-    this.groupHeaders[1].content = `${this.selectedNavigation === 1 ? "▾" : "▸"} 2`;
-    this.logHeader.content = `${this.logCollapsed ? "▸" : "▾"} 日志预览 (${this.messages.length})`;
-    for (const label of [...this.groupHeaders, this.logHeader]) {
-      label.fg = this.theme.muted;
-      label.bg = this.theme.surface;
-      const background = this.labelBackgrounds.get(label);
-      if (background) background.backgroundColor = this.theme.surface;
-    }
-    this.groupHeaders.forEach((label, index) => {
-      if (this.activePanel === index && unlocked) label.fg = this.theme.accent;
+    this.groupTabs.forEach((label, index) => {
+      label.fg = index === this.categoryTab ? this.theme.selectedForeground : this.theme.muted;
+      label.bg = index === this.categoryTab ? this.theme.selectedBackground : this.theme.surface;
+      this.labelBackgrounds.get(label)!.backgroundColor = label.bg;
     });
-    for (const [labels, selected] of [[this.mainTabs, this.contentTab], [this.groupTabs, this.categoryTab], [this.actionTabs, this.actionGroup]] as const)
-      labels.forEach((label, index) => {
-        label.fg = index === selected ? this.theme.selectedForeground : this.theme.muted;
-        label.bg = index === selected ? this.theme.selectedBackground : this.theme.surface;
-        this.labelBackgrounds.get(label)!.backgroundColor = label.bg;
-      });
+    this.taskStopControl.fg = this.theme.warning;
+    this.updateTaskControl();
   }
   private styleList(list: SelectRenderable): void {
     const theme = this.theme;
@@ -567,7 +527,7 @@ export class Workspace {
   private applyTheme(): void {
     this.renderer.setBackgroundColor(this.theme.background);
     this.root.backgroundColor = this.theme.background;
-    for (const box of [...this.panels, this.detailBox, this.logBox]) {
+    for (const box of [...this.panels, this.detailBox]) {
       box.backgroundColor = this.theme.surface;
       box.borderColor = this.theme.border;
       box.titleColor = this.theme.muted;
@@ -575,14 +535,14 @@ export class Workspace {
     for (const list of this.focus) this.styleList(list as SelectRenderable);
     this.title.fg = this.theme.accent;
     this.title.bg = this.theme.background;
+    this.moreControl.fg = this.theme.accent;
+    this.moreControl.bg = this.theme.background;
     this.detail.fg = this.theme.foreground;
     this.detail.bg = this.theme.surface;
-    for (const text of [this.fieldHeader, this.actionHeader, this.actionDetail]) {
+    for (const text of [this.fieldHeader, this.actionHeader, this.overviewDetails, this.taskDetails]) {
       text.fg = this.theme.muted;
       text.bg = this.theme.surface;
     }
-    this.logView.fg = this.theme.muted;
-    this.logView.bg = this.theme.surface;
     this.status.bg = this.theme.background;
     this.footer.fg = this.theme.muted;
     this.footer.bg = this.theme.background;
@@ -597,33 +557,17 @@ export class Workspace {
     this.title.content = `lazyhb · ${this.project ? projectName(this.project) : "项目工作区"} · ${themeLabel(this.settings.theme, this.theme)}\n${this.project?.path ?? "尚未导入项目 · p 导入 · ? 快捷键帮助"}`;
   }
   private resizeLayout(): void {
-    const narrow = this.renderer.width < 80;
-    this.sidebar.visible = true;
-    this.sidebar.minWidth = 18;
-    this.sidebar.width = narrow ? 24 : "30%";
-    this.main.visible = true;
-    const previewRows = this.renderer.height >= 30 ? 3 : 2;
-    this.panels.slice(0, 2).forEach((panel, index) => {
-      const expanded = this.selectedNavigation === index;
-      panel.visible = true;
-      panel.flexGrow = expanded ? 1 : 0;
-      panel.flexShrink = 0;
-      panel.height = expanded ? "auto" : previewRows + 2;
-      panel.minHeight = previewRows + 2;
-    });
-    this.projectList.visible = true;
-    this.groupList.visible = true;
-    this.groupTabs.forEach((tab) => { tab.visible = true; });
-    this.fieldView.visible = this.contentTab === 0;
-    this.actionView.visible = this.contentTab === 1;
-    this.fullLogList.visible = this.contentTab === 2;
-    this.detailBox.height = this.renderer.height >= 36 ? 7 : 5;
-    const logHeight = this.logCollapsed ? 2 : this.renderer.height >= 36 ? 5 : 3;
-    this.logBox.visible = this.contentTab !== 2;
-    this.logBox.height = logHeight;
-    this.logView.visible = !this.logCollapsed;
-    this.logLines = Math.max(1, logHeight - 2);
-    this.logView.content = this.messages.slice(-this.logLines).join("\n");
+    const narrow = this.renderer.width < 90;
+    this.sidebar.width = narrow ? 18 : 24;
+    this.categoryPanel.width = narrow ? 19 : 25;
+    this.taskPanel.width = narrow ? 19 : 29;
+    this.overview.visible = this.page === 0;
+    this.configView.visible = this.page === 1;
+    this.logsView.visible = this.page === 2;
+    this.contentBox.title = workspacePages[this.page];
+    this.detailBox.height = this.renderer.height >= 36 ? 6 : 4;
+    this.overviewDetails.height = this.renderer.height >= 28 ? 9 : 6;
+    this.taskDetails.height = this.renderer.height >= 36 ? 6 : 5;
     this.help?.resize();
     this.updateTaskControl();
     this.updatePanelFocus();
@@ -631,25 +575,42 @@ export class Workspace {
     this.formatActions();
   }
   private canStop(): boolean {
-    return this.connecting || !!this.client?.running || !!this.stopping;
+    return this.connecting || !!this.client?.running || this.runner.active || !!this.stopping;
   }
   private updateTaskControl(): void {
-    const active = this.canStop();
-    this.title.width = Math.max(1, this.renderer.width - 2 - (active ? 26 : 0));
-    this.taskControl.visible = active;
-    const stopping = !!this.stopping || !!this.connectionAbort?.signal.aborted;
-    this.taskControl.content = stopping ? "● 正在停止本地任务…\n  等待进程树清理" : `[停止本地任务 Ctrl+K]\n${this.connecting ? "● CLI 连接中" : "● CLI 运行中"}`;
-    this.taskControl.fg = this.theme.warning;
+    this.taskControl.visible = this.canStop();
+    const running = this.runner.tasks.filter((task) => task.state === "running" || task.state === "stopping").length;
+    this.taskControl.content = `任务日志 → ${running} 活跃\n${this.runner.tasks.length} 个任务 · 可并行新建`;
+    this.taskControl.fg = running ? this.theme.warning : this.theme.muted;
     this.taskControl.bg = this.theme.background;
-    this.footer.content = "1项目 2配置 3字段 4操作 0主区 · []页签 · ?帮助\n" +
-      (active ? stopping ? "正在停止本地任务 · 仍可查看导航与日志" : "Ctrl+K / 点击页头停止本地任务 · t任务菜单"
-        : "Tab切换 · o项目菜单 · r运行 Shift+R发行");
+    const selected = this.runner.tasks.find((task) => task.id === this.selectedTaskId);
+    const stopHint = this.connecting || this.client?.running ? "Ctrl+K取消当前查询"
+      : selected?.state === "running" ? `Ctrl+K停止#${selected.id}`
+      : selected?.state === "stopping" ? `#${selected.id}停止中` : "";
+    const context = this.activePanel === 0 ? "↑↓选项目 Enter切换 o项目菜单 r运行 R发行"
+      : this.activePanel === 1 ? "↑↓选页面 Enter进入"
+      : this.page === 0 ? "↑↓选操作 Enter执行 r运行 R发行 f文件"
+      : this.page === 1 ? this.activePanel === 3 ? "↑↓选分类 Enter进入 Space折叠 []领域"
+        : "↑↓选字段 Enter编辑 a添加 Ctrl+S保存"
+      : `Alt+↑↓切任务 ${this.activePanel === 5 ? "↑↓选任务 Enter查看输出" : "↑↓滚动日志 Home/End首尾"} ${stopHint}`;
+    this.footer.content = "1项目 2概览 3配置 4日志 · Tab焦点 · m操作搜索 · ?帮助\n" + context;
   }
-  private refuseConflict(): void {
+  private refuseConflict(reason = "文件/配置变更受保护；请先停止活跃任务"): void {
     this.blockedNotice = true;
+    this.blockedReason = reason;
     this.updateStatus();
   }
   private async stopTask(): Promise<void> {
+    if (this.selectedTaskId && !this.client?.running && !this.connecting) {
+      const selected = this.runner.tasks.find((task) => task.id === this.selectedTaskId);
+      if (!selected || !["running", "stopping"].includes(selected.state)) {
+        this.refuseConflict("所选任务已结束；请在左侧选择要停止的运行任务。");
+        return;
+      }
+      try { await this.runner.stop(this.selectedTaskId); }
+      catch (error) { this.log("停止所选任务失败：" + String(error)); }
+      return;
+    }
     if (this.stopping) return this.stopping;
     if (!this.canStop()) return;
     this.connectionAbort?.abort();
@@ -733,7 +694,8 @@ export class Workspace {
       this.refreshFields();
       this.log("导入项目后可编辑配置；没有安装 CLI 也可管理本地配置与资源。");
     }
-    this.focusPanel(1);
+    this.refreshTasks();
+    this.switchPage(0);
     void this.connect();
   }
   private async refreshProjects(): Promise<void> {
@@ -761,7 +723,7 @@ export class Workspace {
     }
     this.updateTitle();
     this.refreshFields();
-    this.updateActionDetail();
+    this.updateOverview();
     this.projectList.setSelectedIndex(
       Math.max(
         0,
@@ -771,7 +733,7 @@ export class Workspace {
   }
   private async switchProject(path: string): Promise<void> {
     if (this.navigationLocked() || this.quitting) return;
-    if (this.canStop()) { this.refuseConflict(); return; }
+    if (this.canStop() && this.document?.dirty) { this.refuseConflict(); return; }
     if (this.actionBusy || this.resourceBusy) return;
     this.actionBusy = true;
     try {
@@ -787,15 +749,6 @@ export class Workspace {
   }
   private async projectMenu(path = this.projectList.getSelectedOption()?.value as string | undefined): Promise<void> {
     if (!path || this.navigationLocked() || this.quitting) return;
-    if (this.canStop()) {
-      const action = await this.dialogs.choice("CLI 活跃任务 / 项目只读查看", [
-        { value: "stop", label: "停止本地任务 [Ctrl+K]", description: "不保证设备 App 或远端任务停止" },
-        { value: "properties", label: "查看此项目属性", description: path },
-        { value: "logs", label: "查看任务日志" },
-      ]);
-      if (action) await this.perform(action, path);
-      return;
-    }
     if (this.actionBusy || this.resourceBusy) {
       return;
     }
@@ -881,11 +834,6 @@ export class Workspace {
     const index = selectedPath ? this.fields.findIndex((field) => pointer(field.path) === selectedPath) : -1;
     this.fieldList.setSelectedIndex(index >= 0 ? index : Math.max(0, Math.min(previousIndex, this.fields.length - 1)));
   }
-  private switchActionGroup(index: number): void {
-    this.actionGroup = index;
-    this.formatActions();
-    this.focusPanel(3);
-  }
   private formatActions(): void {
     if (!this.actionList || !this.actionHeader) return;
     this.actionWidth = this.actionList.width;
@@ -893,17 +841,89 @@ export class Workspace {
     const widths = actionColumns(Math.max(1, this.actionList.width - 3));
     const row = (values: readonly string[]) => tableRow(values, widths, this.renderer.widthMethod);
     this.actionHeader.content = "  " + row(["操作", "快捷键", "说明"]);
-    this.actionList.options = actionGroups[this.actionGroup].actions
-      .filter(([value]) => value !== "stop" || this.canStop()).map(([value, label, shortcut, description]) => ({
-      value, name: row([label, shortcut, description]), description,
-    }));
+    this.actionList.options = [
+      ...actionGroups[0].actions.filter(([value]) => ["run", "publish", "files", "properties"].includes(value)),
+      ["config", "全部配置", "3", "打开 manifest 配置工作区"],
+      ["more", "操作搜索…", "m", "输入名称直达项目 / 配置 / 资源 / 工具操作"],
+    ].map(([value, label, shortcut, description]) => ({ value, name: row([label, shortcut, description]), description }));
     this.actionList.setSelectedIndex(Math.max(0, this.actionList.options.findIndex((option) => option.value === selected)));
-    this.updateActionDetail();
+    this.updateOverview();
   }
-  private updateActionDetail(): void {
-    if (!this.actionDetail) return;
-    const action = actionGroups[this.actionGroup].actions.find(([value]) => value === this.actionList.getSelectedOption()?.value);
-    this.actionDetail.content = `${action?.[1] ?? ""} · ${action?.[3] ?? ""}\n${this.actionGroup === 3 ? "全局工具；高级 CLI 参数需再次确认" : "当前已加载项目：" + (this.project?.path ?? "未选择项目")}\n[] 切换项目 / 配置 / 资源 / 工具组 · Enter 执行`;
+  private updateOverview(): void {
+    const document = this.document;
+    const common = ["name", "appid", "versionName", "versionCode"].map((key) =>
+      `${key}：${document ? String(document.get([key], "未设置")) : "无配置"}`).join("\n");
+    this.overviewDetails.content = `${this.project ? projectName(this.project) : "尚未导入项目"} · ${document ? projectKind(document.data) : "项目工作区"}\n${document?.path ?? this.project?.path ?? "p 导入项目"}\n${common}\n运行 / 发行均执行真实 CLI；可同时创建多个独立任务。`;
+  }
+  private operationUnavailable(action: string): string | undefined {
+    if (["logs", "config", "settings", "more"].includes(action)) return;
+    if (action === "stop") {
+      if (this.connecting || this.client?.running) return;
+      const selected = this.runner.tasks.find((task) => task.id === this.selectedTaskId);
+      return selected && ["running", "stopping"].includes(selected.state) ? undefined : "请先选中一个运行中的任务";
+    }
+    if (projectActions[action] && !this.project) return "先导入或选择项目";
+    if (action === "properties") return;
+    if (["edit", "delete", "add", "source", "save", "icons", "splash", "storyboard", "plugin"].includes(action) && !this.document)
+      return "当前项目没有可编辑的 manifest";
+    if (["edit", "delete"].includes(action) && !this.fields[this.fieldList.getSelectedOption()?.value as number])
+      return "先在配置页选择字段";
+    if (this.canStop() && !["run", "publish", "commands", "files"].includes(action))
+      return "有活跃任务；请先停止任务再修改配置或切换 CLI";
+    if ((this.connecting || this.client?.running) && ["run", "publish", "commands"].includes(action))
+      return "CLI 连接或查询进行中，请稍后创建任务";
+    if (this.canStop() && this.document?.dirty) return "有活跃任务且草稿未保存，请先处理现有任务";
+    if (this.actionBusy || this.resourceBusy) return "当前操作尚未完成";
+  }
+  private async moreActions(): Promise<void> {
+    const targetPath = this.activePanel === 0
+      ? this.projectList.getSelectedOption()?.value as string | undefined : this.project?.path;
+    const target = this.projects.find((project) => project.path === targetPath);
+    const preferred = this.page === 1 ? "配置" : this.page === 2 ? "工具" : "项目";
+    const groups = [...actionGroups].sort((a, b) => Number(b.title === preferred) - Number(a.title === preferred));
+    const action = await this.dialogs.choice("操作搜索", groups.flatMap((group) =>
+      group.actions.map(([value, label, shortcut, description]) => ({
+        value, label: `${group.title} · ${label}${shortcut ? ` [${shortcut}]` : ""}`,
+        description, disabledReason: this.operationUnavailable(value),
+      }))), `项目操作 → ${target ? projectName(target) : "未选择"}${targetPath ? " · " + targetPath : ""}\n配置 / 资源 → ${this.project ? projectName(this.project) : "未加载项目"}`, true);
+    if (action) await this.perform(action, targetPath);
+  }
+  private refreshTasks(): void {
+    if (this.selectedTaskId && !this.runner.tasks.some((task) => task.id === this.selectedTaskId)) this.selectedTaskId = 0;
+    this.refreshing = true;
+    this.taskList.options = [
+      { value: 0, name: "工作区通知", description: "CLI 连接、资源与配置操作" },
+      ...this.runner.tasks.map((task) => ({
+        value: task.id, name: `#${task.id} ${this.taskState(task)} · ${task.label}`, description: task.target ?? task.project ?? "",
+      })),
+    ];
+    this.taskList.setSelectedIndex(Math.max(0, this.taskList.options.findIndex((item) => item.value === this.selectedTaskId)));
+    this.refreshing = false;
+    this.refreshTaskOutput();
+  }
+  private taskState(task: TaskRecord): string {
+    return ({ running: "运行中", stopping: "停止中", succeeded: "已完成", failed: "失败", cancelled: "已取消" })[task.state];
+  }
+  private refreshTaskOutput(): void {
+    const task = this.runner.tasks.find((item) => item.id === this.selectedTaskId);
+    const lines = task?.lines ?? this.messages;
+    const changedTask = this.displayedLogId !== this.selectedTaskId;
+    const previous = this.fullLogList.getSelectedIndex();
+    const follow = !changedTask && previous >= this.fullLogList.options.length - 1;
+    this.taskDetails.content = task
+      ? `#${task.id} ${task.label} · ${this.taskState(task)}${task.exitCode === undefined ? "" : " · 退出码 " + task.exitCode}\n${task.target ? "目标：" + task.target + "\n" : ""}${task.project ?? "无显式项目"}\n${task.error ?? "仅此任务独立输出；停止 CLI 不保证 Web 服务、浏览器或设备应用停止。"}`
+      : "工作区通知\nCLI 连接、设备查询和本地配置操作；不混入任何任务输出。";
+    this.taskStopControl.visible = !!task && ["running", "stopping"].includes(task.state);
+    this.taskStopControl.content = task?.state === "stopping" ? `#${task.id} 正在停止…`
+      : `[停止 CLI #${task?.id ?? ""} Ctrl+K]`;
+    if (!changedTask && this.displayedLines === lines && this.displayedLineCount === lines.length && this.displayedLastLine === (lines.at(-1) ?? "")) return;
+    this.fullLogList.options = lines.map((name, value) => ({ name: name || " ", value, description: "" }));
+    this.fullLogList.setSelectedIndex(changedTask ? this.logPositions.get(this.selectedTaskId) ?? Math.max(0, lines.length - 1)
+      : follow ? Math.max(0, lines.length - 1) : previous);
+    this.displayedLogId = this.selectedTaskId;
+    this.displayedLines = lines;
+    this.displayedLineCount = lines.length;
+    this.displayedLastLine = lines.at(-1) ?? "";
   }
   private display(field: Field): string {
     if (!this.document) return "";
@@ -925,9 +945,10 @@ export class Workspace {
       this.fields[this.fieldList.getSelectedOption()?.value as number];
     const category = this.groups.find((item) => item.key === this.group);
     const active = this.canStop();
-    this.status.content = `${this.document?.dirty ? "● 未保存" : this.document ? "✓ 已保存" : "无配置"}${this.resourceBusy ? " · 资源处理中，禁止切换/编辑/退出" : ""}${active ? " · " + (this.connecting ? "CLI 连接中" : this.taskName || "CLI 运行中") : ""}${this.blockedNotice && active ? " · 变更/新任务受保护，请先停止 Ctrl+K" : ""}`;
+    this.status.content = `${this.document?.dirty ? "● 未保存" : this.document ? "✓ 已保存" : "无配置"}${this.resourceBusy ? " · 资源处理中" : ""}${active ? " · " + (this.connecting ? "CLI 连接中" : this.taskName || "有活跃任务") : ""}${this.blockedNotice ? " · " + this.blockedReason : ""}`;
     this.updateTaskControl();
-    this.status.fg = this.document?.dirty || this.resourceBusy || active
+    this.updateOverview();
+    this.status.fg = this.document?.dirty || this.resourceBusy || active || this.blockedNotice
       ? this.theme.warning
       : this.document ? this.theme.success : this.theme.muted;
     this.detail.content = field
@@ -941,10 +962,7 @@ export class Workspace {
     );
     if (this.messages.length > 2000)
       this.messages.splice(0, this.messages.length - 2000);
-    this.logView.content = this.messages.slice(-this.logLines).join("\n");
-    const wasAtEnd = this.fullLogList.getSelectedIndex() >= this.fullLogList.options.length - 1;
-    this.fullLogList.options = this.messages.map((name, value) => ({ name: name || " ", value, description: "" }));
-    if (wasAtEnd) this.fullLogList.setSelectedIndex(Math.max(0, this.messages.length - 1));
+    this.refreshTasks();
     this.updatePanelFocus();
     this.updateStatus();
   }
@@ -1019,6 +1037,17 @@ export class Workspace {
       this.cycleFocus(key.shift ? -1 : 1);
       return;
     }
+    if (this.page === 2 && (key.meta || key.option) && !key.ctrl && ["up", "down"].includes(key.name)) {
+      key.preventDefault();
+      const tasks = this.runner.tasks;
+      if (tasks.length) {
+        const current = tasks.findIndex((task) => task.id === this.selectedTaskId);
+        const next = current < 0 ? key.name === "up" ? tasks.length - 1 : 0
+          : (current + (key.name === "up" ? -1 : 1) + tasks.length) % tasks.length;
+        this.taskList.setSelectedIndex(this.taskList.options.findIndex((item) => item.value === tasks[next].id));
+      }
+      return;
+    }
     if (!key.ctrl && !key.meta && !key.option) {
       if (key.name === "o" && this.activePanel === 0) {
         key.preventDefault(); void this.projectMenu(); return;
@@ -1028,27 +1057,22 @@ export class Workspace {
       }
       if (/^[0-4]$/.test(key.name)) {
         key.preventDefault();
-        this.focusPanel(key.name === "0" ? this.currentMainPanel() : Number(key.name) - 1);
+        if (key.name === "1") this.focusPanel(0);
+        else if (key.name === "0") this.focusPanel(this.currentMainPanel());
+        else this.switchPage(Number(key.name) - 2);
         return;
       }
       if (key.sequence === "[" || key.sequence === "]") {
         key.preventDefault();
         const delta = key.sequence === "[" ? -1 : 1;
-        if (this.activePanel === 1) this.switchCategoryTab((this.categoryTab + delta + 3) % 3);
-        else if (this.activePanel === 3) this.switchActionGroup((this.actionGroup + delta + actionGroups.length) % actionGroups.length);
-        else this.switchContentTab((this.contentTab + delta + 3) % 3);
+        if (this.page === 1) this.switchCategoryTab((this.categoryTab + delta + 3) % 3);
+        else this.switchPage((this.page + delta + 3) % 3);
         return;
       }
       if (key.name === "space" || key.sequence === " ") {
         key.preventDefault();
         const selected = this.groupList.getSelectedOption()?.value as string | undefined;
-        if (this.activePanel === 1 && selected?.startsWith("@")) this.toggleDomain(selected.slice(1));
-        else if (this.activePanel === 5) { this.logCollapsed = !this.logCollapsed; this.resizeLayout(); }
-        return;
-      }
-      if (key.name === "return" && this.activePanel === 5) {
-        key.preventDefault();
-        this.logCollapsed = !this.logCollapsed; this.resizeLayout();
+        if (this.activePanel === 3 && selected?.startsWith("@")) this.toggleDomain(selected.slice(1));
         return;
       }
       if (["left", "right", "h", "l"].includes(key.name)) {
@@ -1068,6 +1092,7 @@ export class Workspace {
                 p: "import",
                 f: "files",
                 t: "commands",
+                m: "more",
               } as Record<string, string>
             )[key.name]
           : undefined;
@@ -1088,18 +1113,18 @@ export class Workspace {
         await this.stopTask();
         this.dialogs.cancelActive();
       }
-      if (this.client?.running) {
+      if (this.client?.running || this.runner.active) {
         if (
           !(await this.dialogs.confirm(
             "终止本地 CLI 并退出？远端云任务不会因此取消。",
           ))
         )
           return;
-        await this.stopTask();
+        await Promise.all([this.runner.stopAll(), this.client?.cancel()]);
       }
       if (!(await this.unsaved())) return;
       this.connectionAbort?.abort();
-      await this.stopTask();
+      await Promise.all([this.runner.stopAll(), this.client?.cancel(), this.pendingClient?.cancel()]);
       this.disposed = true;
       this.removeListeners();
       this.renderer.destroy();
@@ -1113,7 +1138,7 @@ export class Workspace {
     this.disposed = true;
     this.connectionAbort?.abort();
     this.dialogs.cancelActive();
-    await Promise.all([this.client?.cancel(), this.pendingClient?.cancel(), this.stopping]);
+    await Promise.all([this.runner.stopAll(), this.client?.cancel(), this.pendingClient?.cancel(), this.stopping]);
     this.removeListeners();
     this.renderer.destroy();
     await this.renderer.closed;
@@ -1213,16 +1238,10 @@ export class Workspace {
   async perform(action: string, capturedPath?: string): Promise<void> {
     if (action === "stop") { await this.stopTask(); return; }
     if (this.navigationLocked() || this.quitting) return;
-    if (action === "logs") { this.switchContentTab(2); return; }
+    if (action === "logs") { this.switchPage(2); return; }
+    if (action === "config") { this.switchPage(1); return; }
+    if (action === "more") { if (!this.actionBusy) await this.moreActions(); return; }
     if (action === "settings") { this.showSettings(); return; }
-    if (action === "commands" && this.canStop()) {
-      const selected = await this.dialogs.choice("当前 CLI 任务", [
-        { value: "stop", label: "停止本地任务 [Ctrl+K]", description: "仅停止本地 CLI 进程树 / 监听，不保证设备 App 或远端云任务停止" },
-        { value: "logs", label: "查看任务日志" },
-      ], this.connecting ? "CLI 正在连接；停止后保留原连接与选择。" : this.taskName);
-      if (selected) await this.perform(selected);
-      return;
-    }
     if (action === "properties") {
       const path = capturedPath ?? (this.activePanel === 0 ? this.projectList.getSelectedOption()?.value as string | undefined : this.project?.path);
       const project = this.projects.find((item) => item.path === path);
@@ -1234,8 +1253,9 @@ export class Workspace {
       } catch (error) { this.log(String(error)); }
       return;
     }
-    if (this.canStop()) { this.refuseConflict(); return; }
-    if (this.actionBusy || this.resourceBusy) return;
+    const unavailable = this.operationUnavailable(action);
+    if (unavailable) { this.refuseConflict(unavailable); return; }
+    this.blockedNotice = false;
     const targetPath = capturedPath ?? (this.activePanel === 0 && projectActions[action]
       ? this.projectList.getSelectedOption()?.value as string | undefined
       : this.project?.path);
@@ -1344,7 +1364,7 @@ export class Workspace {
           this.document = undefined;
           await this.refreshProjects();
           if (this.projects[0]) await this.loadProject(this.projects[0]);
-          else { this.updateTitle(); this.updateActionDetail(); }
+          else { this.updateTitle(); this.updateOverview(); }
         }
       } else if (action === "files") await this.fileManager();
       else if (["icons", "splash", "storyboard", "plugin"].includes(action))
@@ -1593,12 +1613,14 @@ export class Workspace {
         const result = await this.dialogs.fileChoice(
           "项目文件：" + join(files.root, current),
           [
-            { value: "@close", label: "返回配置" },
+            { value: "@close", label: "返回工作台" },
             { value: "@up", label: "../ 上一级" },
-            { value: "@new", label: "新建文本文件" },
-            { value: "@mkdir", label: "新建目录" },
+            ...(!this.runner.active ? [
+              { value: "@new", label: "新建文本文件" },
+              { value: "@mkdir", label: "新建目录" },
+            ] : []),
             { value: "@search", label: "搜索文字" },
-            ...(current !== "."
+            ...(current !== "." && !this.runner.active
               ? [
                   {
                     value: "@directory",
@@ -1687,20 +1709,20 @@ export class Workspace {
         const operation = await this.dialogs.choice(selected, [
           ...(!info.isDirectory() && isPreviewImage(selected) ? [{ value: "preview", label: "只读图片预览" }] : []),
           ...(!info.isDirectory()
-            ? [{ value: "edit", label: "编辑 UTF-8 文本" }]
+            ? [{ value: "edit", label: this.runner.active ? "只读 UTF-8 文本" : "编辑 UTF-8 文本" }]
             : []),
-          { value: "rename", label: "重命名" },
-          { value: "copy", label: "复制" },
-          { value: "move", label: "移动" },
+          ...(!this.runner.active ? [
+            { value: "rename", label: "重命名" },
+            { value: "copy", label: "复制" },
+            { value: "move", label: "移动" },
+          ] : []),
           { value: "properties", label: "属性" },
         ]);
         if (!operation) continue;
         if (operation === "preview") await preview();
         else if (operation === "edit") {
           const text = await files.read(selected);
-          await this.dialogs.text(selected, text, (value) =>
-            files.write(selected, value, text),
-          );
+          await this.dialogs.text(selected, text, this.runner.active ? undefined : (value) => files.write(selected, value, text));
         } else if (operation === "properties")
           await this.dialogs.text(
             "文件属性",
@@ -1728,7 +1750,7 @@ export class Workspace {
     const configurationMode = choice.id.endsWith(":config");
     const parameters = { ...choice.defaults };
     if (!configurationMode && choice.projectParameter) parameters[choice.projectParameter] = capturedPath;
-    const controls = ["platform", "android.androidpacktype", "iscustom", "playground", "ssr"];
+    const controls = ["platform", "android.androidpacktype", "iscustom", "playground", "ssr", ...(choice.mode === "run" && choice.target === "web" ? ["browser"] : [])];
     for (const key of controls) {
       const parameter = taskParameters(choice, parameters).find((item) => item.name === key);
       if (!parameter) continue;
@@ -1741,15 +1763,16 @@ export class Workspace {
       }
       if (projectKind(this.document!.data) === "uni-app-x" && key === "android.androidpacktype") options = options.filter((value) => !["2", "3"].includes(value));
       if (!options.length) continue;
-      const preferred = parameter.default && options.includes(parameter.default) ? parameter.default
-        : ["iscustom", "ssr"].includes(key) && options.includes("false") ? "false"
-          : key === "playground" && options.includes("standard") ? "standard" : options[0];
+      const preferred = key === "browser" && options.includes("Chrome") ? "Chrome"
+        : parameter.default && options.includes(parameter.default) ? parameter.default
+          : ["iscustom", "ssr"].includes(key) && options.includes("false") ? "false"
+            : key === "playground" && options.includes("standard") ? "standard" : options[0];
       options = [preferred, ...options.filter((value) => value !== preferred)];
       const selected = await this.dialogs.choice(`${choice.label} · --${key}`, options.map((value) => ({
         value, label: (key === "playground" ? value === "standard" ? "标准运行基座" : value === "custom" ? "自定义云打包运行基座" : value
           : key === "iscustom" ? value === "true" ? "制作自定义调试基座（不是正式发行包）" : "正式应用安装包（不启用自定义基座）" : value) + (value === parameter.default ? "（CLI 默认）" : ""),
         description: key === "android.androidpacktype" ? ({ "0": "自有证书：后续必须填写证书和密码（仅私有 JSON 传递）", "1": "公共证书", "2": "DCloud 老版证书，仅 classic", "3": "云端证书，仅 classic" } as Record<string, string>)[value] : parameter.description,
-      })), `项目已锁定：${capturedPath}\n产物：${choice.artifact}\n前置：${choice.prerequisites}`);
+      })), `项目已锁定：${capturedPath}\n产物：${choice.artifact}\n前置：${choice.prerequisites}${key === "browser" ? "\n确认运行后会打开所选浏览器；端口使用项目 Web devServer 配置，多个项目请避免端口冲突。" : ""}`);
       if (selected === undefined) return;
       parameters[key] = selected;
     }
@@ -1764,7 +1787,7 @@ export class Workspace {
           { value: "first", label: "使用首个连接设备", description: "不传 deviceId；CLI 默认首个设备，可能不是期望的手机" },
           { value: "manual", label: "指定 deviceId", description: "填写设备序列号；设备查询结果仅显示，不猜测输出格式" },
           ...(canQuery ? [{ value: "query", label: "查询已连接设备", description: `执行只读 devices list --platform ${platform}` }] : []),
-        ], output || `项目：${capturedPath}\n${deviceParameter.description}\n${choice.prerequisites}`);
+        ], output || `项目：${capturedPath}\n${deviceParameter.description}\n${choice.prerequisites}\n每个任务独立绑定本次设备；同时运行多台设备时建议指定 deviceId，避免都选中首个设备。`);
         if (!selected) return;
         if (selected === "query") {
           this.taskName = deviceCommand!.name;
@@ -1817,6 +1840,9 @@ export class Workspace {
       key: parameter.name, label: "--" + parameter.name + (parameter.required ? "（必填）" : ""),
       description: parameter.description + (parameter.choices.length ? "\n允许：" + parameter.choices.join(" / ") : "") + "\n留空使用 CLI / 项目默认值；不是输出项目选择器",
       value: "",
+      choices: parameter.choices,
+      allowOmit: !parameter.required,
+      defaultValue: parameter.default,
       secret: /password|secret|token|privatekey/i.test(parameter.name) || parameter.description.includes("密码"),
     }));
     // Mode, target, platform and base are selected above, never editable as raw CLI switches.
@@ -1907,42 +1933,54 @@ export class Workspace {
         break;
       }
     } else {
-      const selected = await this.dialogs.choice("高级 CLI 任务（云操作可能产生费用）", this.commands.map((command) => ({ value: command.name, label: command.name, description: command.description })));
+      const selected = await this.dialogs.choice("高级 CLI 任务（云操作可能产生费用）", this.commands.map((command) => ({ value: command.name, label: command.name, description: command.description })), `目标项目：${capturedPath ?? "无显式项目"}\n输入命令名称或说明筛选；参数与最终执行仍需确认。`, true);
       if (!selected) return;
       command = this.commands.find((item) => item.name === selected)!;
       const values = await this.dialogs.form(selected, command.parameters.map((parameter) => ({
         key: parameter.name, label: "--" + parameter.name + (parameter.required ? "（必填）" : ""),
         description: parameter.description + "\n留空省略；无值开关填 @flag",
         value: parameter.name === "ui" ? "false" : ["project", "projectPath", "prj"].includes(parameter.name) ? capturedPath : "",
+        choices: parameter.choices,
+        allowOmit: !parameter.required,
+        defaultValue: parameter.default,
         secret: /password|secret|token|privatekey/i.test(parameter.name) || parameter.description.includes("密码"),
       })), (values) => { client.arguments(command, Object.fromEntries(Object.entries(values).filter(([, value]) => value !== "")), true); });
       if (!values) return;
       parameters = Object.fromEntries(Object.entries(values).filter(([, value]) => value !== ""));
     }
     const mode = choice ? taskMode(choice, parameters) : undefined;
-    const modeLabel = mode === "compile" ? "开发仅编译（不是生产发行或实际运行）" : mode === "run" ? "设备运行" : mode === "manage" ? "云打包管理" : choice?.label ?? "高级 CLI";
+    const webRunning = command.name === "launch web" && parameters.compile === "false";
+    const modeLabel = mode === "compile" ? "开发仅编译（不是生产发行或实际运行）" : webRunning ? "Web 开发运行（打开浏览器）" : mode === "run" ? "设备运行" : mode === "manage" ? "云打包管理" : choice?.label ?? "高级 CLI";
     const customBase = packConfiguration?.iscustom === true || packConfiguration?.iscustom === "true" || parameters.iscustom === "true";
     const artifact = command.name === "pack" ? customBase ? "自定义云调试基座 APK / IPA（不是正式发行包）" : "正式应用安装包 APK / IPA（云任务结果为准）" : choice?.artifact;
     const finalPath = packConfiguration ? capturedPath : ["project", "projectPath", "prj"].map((key) => parameters[key]).filter(Boolean).join(" / ");
+    let target: string | undefined;
+    if (command.name.startsWith("launch ") || command.name.startsWith("logcat ")) {
+      const platform = command.name.split(" ")[1];
+      if (platform === "web") {
+        const webRoot = this.document && projectKind(this.document.data) === "uni-app-x" ? "web" : "h5";
+        const configuredPort = finalPath === this.project?.path ? this.document?.get([webRoot, "devServer", "port"]) : undefined;
+        const browser = parameters.browser || command.parameters.find((parameter) => parameter.name === "browser")?.default || "CLI 默认浏览器";
+        target = parameters.compile === "true" ? "web · 仅编译"
+          : `web · ${browser} · ${configuredPort === undefined ? "端口以项目配置/日志为准" : "配置端口 " + String(configuredPort)}`;
+      } else {
+        target = `${platform} · ${parameters.deviceId ? "设备 " + parameters.deviceId : "首个连接设备"}${parameters.iosTarget ? " · " + parameters.iosTarget : ""}`;
+      }
+    }
     const visibleParameters = Object.entries(parameters).map(([key, value]) =>
       `--${key} ${/password|secret|token|privatekey/i.test(key) || command.parameters.find((parameter) => parameter.name === key)?.description.includes("密码") ? "〈私密值〉" : value}`).join("\n");
-    const summary = `${modeLabel}：${command.name}\n目标项目：${finalPath || "无显式项目参数"}\n${choice ? `产物：${artifact}\n前置条件：${choice.prerequisites}\n风险：${choice.risk}\n` : "高级命令：产物与副作用以当前 CLI help 及日志为准；云操作可能收费。\n"}最终参数：\n${visibleParameters || "无"}\n${packConfiguration ? `JSON 已安全读取，project 已绑定；确认后只传私有快照，不重新读取源文件。平台：${String(packConfiguration.platform ?? "android（默认）")}\n` : ""}不会打开 IDE、浏览器、开发者工具或模拟器。输出位置以 CLI 日志为准；凭据不记录。Ctrl+K 仅取消本地进程，不取消远端任务。`;
+    const summary = `${modeLabel}：${command.name}\n目标项目：${finalPath || "无显式项目参数"}\n${target ? "运行实例：" + target + "\n" : ""}${choice ? `产物：${artifact}\n前置条件：${choice.prerequisites}\n风险：${choice.risk}\n` : "高级命令：产物与副作用以当前 CLI help 及日志为准；云操作可能收费。\n"}最终参数：\n${visibleParameters || "无"}\n${packConfiguration ? `JSON 已安全读取，project 已绑定；确认后只传私有快照，不重新读取源文件。平台：${String(packConfiguration.platform ?? "android（默认）")}\n` : ""}${webRunning ? "将启动 Web 开发运行并打开所选浏览器。端口沿用项目配置；同一项目/设备的并发构建或部署可能争用上游资源。\n" : "不会打开 IDE、浏览器、开发者工具或模拟器。\n"}输出位置以 CLI 日志为准；凭据不记录。Ctrl+K 仅取消本地进程，不关闭浏览器、不保证设备应用停止，也不取消远端任务。`;
     if (!(await this.dialogs.confirm(summary))) return;
     if (choice && !packConfiguration && parameters[choice.projectParameter!] !== capturedPath) throw new Error("任务目标项目发生变化，已拒绝执行");
     if (choice) validateTask(choice, parameters);
     client.arguments(command, parameters, true);
-    this.taskName = command.name;
     this.blockedNotice = false;
-    this.log(`开始 CLI：${command.name} · ${modeLabel}${finalPath ? " · " + finalPath : ""}`);
-    const running = client.run(command, parameters, (line) => this.log(line), { allowSensitive: true, packConfiguration, project: capturedPath });
-    this.updateStatus(); this.formatActions();
-    try {
-      const code = await running;
-      this.log(`CLI ${command.name} 结束，退出码 ${code}；${artifact ?? "产物以日志为准"}`);
-    } finally {
-      this.taskName = "";
-      this.blockedNotice = false;
-      if (!this.disposed) { this.updateStatus(); this.formatActions(); }
-    }
+    const task = this.runner.start(client, command, parameters,
+      { allowSensitive: true, packConfiguration, project: capturedPath },
+      { label: `${command.name} · ${modeLabel}`, project: finalPath || capturedPath, target });
+    this.logPositions.set(this.selectedTaskId, this.fullLogList.getSelectedIndex());
+    this.selectedTaskId = task.id;
+    this.refreshTasks();
+    this.switchPage(2);
   }
 }

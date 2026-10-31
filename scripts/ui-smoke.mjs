@@ -29,6 +29,10 @@ try {
   app = new Workspace(setup.renderer, { project, cli: join(root, "no-cli") });
   await app.init();
   await setup.renderOnce();
+  setup.mockInput.pressKey("4");
+  await setup.renderOnce();
+  setup.mockInput.pressKey("2");
+  await setup.renderOnce();
   const tick = async () => {
     await Bun.sleep(20);
     await setup.flush();

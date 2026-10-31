@@ -25,7 +25,7 @@ const escape = async (ui: TestRendererSetup) => {
   const key = once(ui.renderer.keyInput, "keypress"); ui.mockInput.pressEscape(); await key; await tick(ui);
 };
 const modal = (ui: TestRendererSetup) => ui.renderer.root.getChildren().find((node) => node !== ui.renderer.root.findDescendantById("workspace"));
-const choice = (ui: TestRendererSetup) => modal(ui)?.getChildren().find((node) => "getSelectedOption" in node) as SelectRenderable | undefined;
+const choice = (ui: TestRendererSetup) => modal(ui)?.getChildren().find((node) => node.visible && node.id !== "form-enum" && "getSelectedOption" in node) as SelectRenderable | undefined;
 const choose = async (ui: TestRendererSetup, value: string) => {
   await settle(ui, () => !!choice(ui));
   const list = choice(ui)!;
@@ -43,8 +43,16 @@ const submitParameters = async (ui: TestRendererSetup, values: Record<string, st
   for (let field = 0; field < total; field++) {
     const key = /^\d+\/\d+ --([\w.-]+)/.exec(current() ?? "")?.[1];
     if (key && Object.hasOwn(values, key)) {
-      ui.mockInput.pressKey("a", { ctrl: true });
-      if (values[key]) await ui.mockInput.typeText(values[key]); else ui.mockInput.pressBackspace();
+      const selector = ui.renderer.root.findDescendantById("form-enum") as SelectRenderable | undefined;
+      if (selector?.visible) {
+        const target = selector.options.findIndex((option) => option.value === values[key]);
+        expect(target).toBeGreaterThanOrEqual(0);
+        for (let at = selector.getSelectedIndex(); at < target; at++) ui.mockInput.pressArrow("down");
+        for (let at = selector.getSelectedIndex(); at > target; at--) ui.mockInput.pressArrow("up");
+      } else {
+        ui.mockInput.pressKey("a", { ctrl: true });
+        if (values[key]) await ui.mockInput.typeText(values[key]); else ui.mockInput.pressBackspace();
+      }
     }
     ui.mockInput.pressArrow("down", { meta: true }); await tick(ui);
   }
@@ -99,7 +107,7 @@ test("project context binds highlighted target, preserves dirty cancellation, an
     expect(fixtureHelp.stdout.toString()).toContain("project list");
     app = new Workspace(ui.renderer, { project: a, cli });
     await app.init(); await tick(ui);
-    await settle(ui, () => !!(ui.renderer.root.findDescendantById("workspace-logs") as TextRenderable).plainText);
+    await settle(ui, () => (ui.renderer.root.findDescendantById("task-output") as SelectRenderable).options.some((item) => item.name.includes("CLI 已连接")));
     const fields = ui.renderer.root.findDescendantById("fields") as SelectRenderable;
     ui.mockInput.pressKey("3"); await tick(ui);
     ui.mockInput.pressArrow("down"); ui.mockInput.pressArrow("down"); await tick(ui);
@@ -117,9 +125,9 @@ test("project context binds highlighted target, preserves dirty cancellation, an
       };
       expect(valueColumn("中英ABC")).toBe(valueColumn("fixture"));
       if (width === 120) await selectionProof(ui, fields, "fields-spans.json");
-      ui.mockInput.pressKey("4"); await tick(ui);
+      ui.mockInput.pressKey("2"); await tick(ui);
       await saveProof(`actions-${width}x${height}.txt`, ui.captureCharFrame());
-      const operations = ui.renderer.root.findDescendantById("actions") as SelectRenderable;
+      const operations = ui.renderer.root.findDescendantById("overview-actions") as SelectRenderable;
       if (width === 120) await selectionProof(ui, operations, "actions-spans.json");
       ui.mockInput.pressKey("3"); await tick(ui);
     }
@@ -157,7 +165,7 @@ test("project context binds highlighted target, preserves dirty cancellation, an
     await saveProof("compile-confirm.txt", ui.captureCharFrame());
     await choose(ui, "no"); await settle(ui, () => !modal(ui));
     expect(await fs.exists(record)).toBe(false);
-    // Submit a new run and confirm; while the real fixture child is live, switching is refused.
+    // A running task keeps its captured project while the workspace browses another project.
     const running = app.perform("run", b); await choose(ui, "app-android"); await choose(ui, "launch app-android:run");
     await choose(ui, "yes");
     await settle(ui, () => fs.exists(record));
@@ -167,11 +175,12 @@ test("project context binds highlighted target, preserves dirty cancellation, an
     ui.mockInput.pressKey("1"); await tick(ui);
     const aIndex = projects.options.findIndex((option) => option.value === a);
     projects.setSelectedIndex(aIndex); ui.mockInput.pressEnter(); await tick(ui);
-    expect((ui.renderer.root.findDescendantById("workspace-title") as TextRenderable).plainText).toContain(b);
+    await settle(ui, () => (ui.renderer.root.findDescendantById("workspace-title") as TextRenderable).plainText.includes(a));
     await fs.writeFile(release, "release");
     await running; await tick(ui);
+    await settle(ui, () => !(ui.renderer.root.findDescendantById("task-records") as SelectRenderable).options.some((item) => item.name.includes("运行中")));
     ui.mockInput.pressKey("4"); await tick(ui);
-    const publishing = app.perform("publish"); await choose(ui, "web"); await choose(ui, "publish web:web");
+    const publishing = app.perform("publish", b); await choose(ui, "web"); await choose(ui, "publish web:web");
     await choose(ui, "yes");
     await settle(ui, async () => (await fs.readFile(record, "utf8")).trim().split("\n").length === 2);
     const records = (await fs.readFile(record, "utf8")).trim().split("\n").map((line) => JSON.parse(line));
@@ -186,6 +195,7 @@ test("project context binds highlighted target, preserves dirty cancellation, an
     expect(ui.captureCharFrame()).toContain("开发仅编译");
     await saveProof("compile-mode-locked.txt", ui.captureCharFrame());
     await choose(ui, "yes"); await compileOnly;
+    await settle(ui, async () => (await fs.readFile(record, "utf8")).trim().split("\n").length === 3);
     const finalRecords = (await fs.readFile(record, "utf8")).trim().split("\n").map((line) => JSON.parse(line));
     expect(finalRecords).toHaveLength(3);
     expect(finalRecords[2][finalRecords[2].indexOf("--compile") + 1]).toBe("true");
@@ -290,17 +300,18 @@ else {
     const compilation = Bun.spawn([process.execPath, "build", source, "--compile", "--outfile", cli], { stdout: "ignore", stderr: "pipe" });
     expect(await compilation.exited).toBe(0);
     app = new Workspace(ui.renderer, { project, cli }); await app.init(); await tick(ui);
-    await settle(ui, () => (ui.renderer.root.findDescendantById("workspace-logs") as TextRenderable).plainText.includes("CLI 已连接"));
-    const records = async (): Promise<{ argv: string[]; configuration?: Record<string, any>; configPath?: string; fileMode?: number; directoryMode?: number }[]> =>
-      await fs.exists(record) ? (await fs.readFile(record, "utf8")).trim().split("\n").map((line) => JSON.parse(line)) : [];
+    await settle(ui, () => (ui.renderer.root.findDescendantById("task-output") as SelectRenderable).options.some((item) => item.name.includes("CLI 已连接")));
+    const records = async (): Promise<{ argv: string[]; configuration?: Record<string, any>; configPath?: string; fileMode?: number; directoryMode?: number }[]> => {
+      await settle(ui, () => !(ui.renderer.root.findDescendantById("task-records") as SelectRenderable).options.some((item) => /运行中|停止中/.test(item.name)));
+      return await fs.exists(record) ? (await fs.readFile(record, "utf8")).trim().split("\n").map((line) => JSON.parse(line)) : [];
+    };
     const start = async (kind: "run" | "publish", target: string, mode: string) => {
       const running = app!.perform(kind, project); await choose(ui, target); await choose(ui, mode); return { running };
     };
-    const blocked = await start("run", "web", "launch web:external");
-    await choose(ui, "back");
-    expect(choice(ui)!.options.some((option) => option.value === "launch web:compile")).toBe(true);
-    await choose(ui, "@back"); expect(choice(ui)!.options.some((option) => option.value === "web")).toBe(true);
-    await escape(ui); await blocked.running; expect(await records()).toHaveLength(0);
+    const cancelledWeb = await start("run", "web", "launch web:run");
+    await choose(ui, "Chrome");
+    await submitParameters(ui); await choose(ui, "no"); await cancelledWeb.running;
+    expect(await records()).toHaveLength(0);
     const development = await start("run", "web", "launch web:compile");
     await submitParameters(ui); await choose(ui, "no"); await development.running; expect(await records()).toHaveLength(0);
     const device = await start("run", "app-android", "launch app-android:run");
@@ -377,7 +388,7 @@ else {
     expect(snapshotRecord.configPath).not.toBe(config);
     expect(await fs.exists(snapshotRecord.configPath!)).toBe(false);
     if (process.platform !== "win32") { expect(snapshotRecord.fileMode).toBe(0o600); expect(snapshotRecord.directoryMode).toBe(0o700); }
-    expect((ui.renderer.root.findDescendantById("workspace-logs") as TextRenderable).plainText).not.toContain(secret);
+    expect((ui.renderer.root.findDescendantById("task-output") as SelectRenderable).options.map((item) => item.name).join("\n")).not.toContain(secret);
     const cancel = await start("publish", "cancel", "pack cancel:cancel");
     await choose(ui, "app-ios"); await submitParameters(ui); await choose(ui, "yes"); await cancel.running;
     expect((await records()).at(-1)!.argv).toEqual(["pack", "cancel", "--project", project, "--platform", "app-ios"]);
@@ -394,7 +405,7 @@ else {
   }
 });
 
-test("navigation keeps both real lists visible and gives the last selected group more space", async () => {
+test("overview, config and split logs retain stable project navigation across resize and overlays", async () => {
   const root = await fs.realpath(await fs.mkdtemp(join(tmpdir(), "lazyhb-navigation-")));
   const previous = process.env.LAZYHB_STATE_DIR;
   process.env.LAZYHB_STATE_DIR = join(root, "state");
@@ -407,33 +418,25 @@ test("navigation keeps both real lists visible and gives the last selected group
       await new ProjectRegistry().add(project);
     }
     app = new Workspace(ui.renderer, { cli: join(root, "no-cli") });
-    await app.init(); await settle(ui, () => ui.captureCharFrame().includes("未找到") || ui.captureCharFrame().includes("不可执行"));
+    await app.init();
+    await settle(ui, () => (ui.renderer.root.findDescendantById("task-output") as SelectRenderable).options.some((item) => item.name.includes("不可执行")));
     const projects = ui.renderer.root.findDescendantById("projects")!;
-    const categories = ui.renderer.root.findDescendantById("categories")!;
+    const pages = ui.renderer.root.findDescendantById("workspace-pages") as SelectRenderable;
     for (const [width, height] of [[120, 40], [100, 30], [64, 24]]) {
       ui.resize(width, height); ui.mockInput.pressKey("2"); await tick(ui);
-      expect(projects.visible && categories.visible).toBe(true);
-      expect(projects.height).toBeGreaterThanOrEqual(2);
-      expect(categories.height).toBeGreaterThan(projects.height);
-      expect(ui.captureCharFrame()).toContain("Preview A");
-      const configHeight = categories.height;
+      const projectHeight = projects.height;
       ui.mockInput.pressKey("3"); await tick(ui);
-      expect(categories.height).toBe(configHeight);
-      ui.mockInput.pressKey("b", { ctrl: true }); await tick(ui);
-      expect(projects.height).toBeGreaterThanOrEqual(2);
-      expect(categories.height).toBe(configHeight);
+      expect(ui.renderer.root.findDescendantById("fields")!.focused).toBe(true);
+      expect(projects.height).toBe(projectHeight);
       ui.mockInput.pressKey("?"); await tick(ui); await escape(ui);
       ui.mockInput.pressKey(","); await tick(ui); await escape(ui);
-      expect(projects.visible && categories.visible).toBe(true);
-      await saveProof(`navigation-config-${width}x${height}.txt`, ui.captureCharFrame());
-      ui.mockInput.pressKey("1"); await tick(ui);
-      expect(projects.height).toBeGreaterThan(categories.height);
-      expect(categories.height).toBeGreaterThanOrEqual(2);
-      const projectHeight = projects.height;
-      ui.mockInput.pressKey("0"); await tick(ui);
+      expect(ui.renderer.root.findDescendantById("fields")!.focused).toBe(true);
+      ui.mockInput.pressKey("4"); await tick(ui);
+      expect(ui.renderer.root.findDescendantById("task-output")!.focused).toBe(true);
       expect(projects.height).toBe(projectHeight);
-      expect(categories.visible).toBe(true);
-      await saveProof(`navigation-projects-${width}x${height}.txt`, ui.captureCharFrame());
+      expect(pages.getSelectedOption()?.value).toBe(2);
+      expect(projects.visible).toBe(true);
+      await saveProof(`workspace-pages-${width}x${height}.txt`, ui.captureCharFrame());
     }
   } finally {
     if (app) await app.shutdown(); await ui.dispose();
@@ -449,6 +452,11 @@ test("live CLI tasks stay inspectable, stop from mouse and keys, and cancelled d
   const ui = await createTestRenderer({ width: 120, height: 40, exitOnCtrlC: false });
   let app: Workspace | undefined;
   const alive = (pid: number) => {
+    if (process.platform !== "win32") {
+      const state = Bun.spawnSync(["/bin/ps", "-o", "stat=", "-p", String(pid)], { stdout: "pipe", stderr: "pipe" });
+      // Only an actual zombie state proves an existing PID cannot execute.
+      if (state.exitCode === 0 && /^Z\S*$/.test(state.stdout.toString().trim())) return false;
+    }
     try { process.kill(pid, 0); return true; }
     catch (error) { if ((error as NodeJS.ErrnoException).code === "ESRCH") return false; throw error; }
   };
@@ -485,7 +493,7 @@ if(args.includes('--help')) {
  process.on('SIGTERM',()=>{if(!descendant) process.exit(0)});
  if(args[0]!=='tree-grandchild') spawn(process.execPath,[descendant?'tree-grandchild':'tree-child',run],{shell:false,stdio:'ignore'});
  setInterval(()=>writeFileSync(${JSON.stringify(join(root, "heartbeat-"))}+process.pid,String(Date.now())),30);
- if(!descendant) console.log('fixture watch ready');
+ if(!descendant) console.log('fixture watch ready '+run);
 }
 `);
     const compilation = Bun.spawn([process.execPath, "build", source, "--compile", "--outfile", cli], { stdout: "ignore", stderr: "pipe" });
@@ -495,15 +503,16 @@ if(args.includes('--help')) {
     await app.init();
     const control = ui.renderer.root.findDescendantById("task-control") as TextRenderable;
     const projects = ui.renderer.root.findDescendantById("projects") as SelectRenderable;
-    const categories = ui.renderer.root.findDescendantById("categories") as SelectRenderable;
-    const logs = ui.renderer.root.findDescendantById("full-logs") as SelectRenderable;
+    const logs = ui.renderer.root.findDescendantById("task-output") as SelectRenderable;
     await settle(ui, () => logs.options.some((option) => option.name.includes("CLI 已连接")));
     const taskRecords = async () => (await fs.readFile(record, "utf8")).trim().split("\n").map((line) => JSON.parse(line) as { argv: string[]; run: string });
-    const treeReady = async () => {
+    const treeReady = async (minimumRecords = 0) => {
       await settle(ui, async () => {
         if (!(await fs.exists(pidsFile))) return false;
         const rows = (await fs.readFile(pidsFile, "utf8")).trim().split("\n").map((line) => JSON.parse(line) as { pid: number; run: string });
-        const latest = (await taskRecords()).at(-1)!;
+        const records = await taskRecords();
+        if (records.length < minimumRecords) return false;
+        const latest = records.at(-1)!;
         const tree = rows.filter((row) => row.run === latest.run);
         if (tree.length < 3) return false;
         for (const row of tree) if (!allPids.includes(row.pid)) allPids.push(row.pid);
@@ -511,83 +520,67 @@ if(args.includes('--help')) {
       });
     };
     const start = async () => {
+      const expected = (await fs.exists(record) ? (await taskRecords()).length : 0) + 1;
       ui.mockInput.pressKey("3"); await tick(ui);
       const running = app!.perform("run");
       await choose(ui, "app-android"); await choose(ui, "launch app-android:run"); await choose(ui, "first"); await choose(ui, "yes");
-      await treeReady();
+      await treeReady(expected);
       expect(control.visible).toBe(true);
       expect(ui.captureCharFrame()).toContain("Ctrl+K");
       return { running };
     };
-    const first = await start();
-    const count = logs.options.length;
-    for (let repeat = 0; repeat < 12; repeat++) {
-      await app.perform("run"); await app.perform("cli"); await app.perform("save");
-    }
-    expect(logs.options.length).toBe(count);
-    expect(await taskRecords()).toHaveLength(1);
-    ui.mockInput.pressKey("2"); await tick(ui);
-    ui.mockInput.pressArrow("down"); await tick(ui);
-    expect(categories.focused).toBe(true);
-    ui.mockInput.pressKey("3"); await tick(ui);
-    expect(ui.renderer.root.findDescendantById("fields")!.focused).toBe(true);
+    const first = await start(); await first.running;
+    const firstPids = [...allPids];
+    const tasks = ui.renderer.root.findDescendantById("task-records") as SelectRenderable;
+    const firstId = tasks.getSelectedOption()!.value;
+    const second = await start(); await second.running;
+    const secondId = tasks.getSelectedOption()!.value;
+    expect(secondId).not.toBe(firstId);
+    expect(await taskRecords()).toHaveLength(2);
+    expect(firstPids.every(alive)).toBe(true);
+    expect(logs.focused).toBe(true);
+    ui.mockInput.pressArrow("up", { meta: true }); await tick(ui);
+    expect(tasks.getSelectedOption()!.value).toBe(firstId);
+    expect(logs.focused).toBe(true);
+    const firstOutput = await taskRecords();
+    expect(logs.options.some((item) => item.name.includes(firstOutput[0].run))).toBe(true);
+    expect(logs.options.some((item) => item.name.includes(firstOutput[1].run))).toBe(false);
+    ui.mockInput.pressArrow("down", { meta: true }); await tick(ui);
+    expect(tasks.getSelectedOption()!.value).toBe(secondId);
+    expect(logs.focused).toBe(true);
+    await app.perform("cli"); await app.perform("save"); expect(modal(ui)).toBeUndefined();
     ui.mockInput.pressKey("1"); await tick(ui);
     projects.setSelectedIndex(projects.options.findIndex((option) => option.value === b));
-    ui.mockInput.pressEnter(); await tick(ui);
-    expect((ui.renderer.root.findDescendantById("workspace-title") as TextRenderable).plainText).toContain(a);
+    ui.mockInput.pressEnter();
+    await settle(ui, () => (ui.renderer.root.findDescendantById("workspace-title") as TextRenderable).plainText.includes(b));
+    ui.mockInput.pressKey("3"); await tick(ui);
+    expect(ui.renderer.root.findDescendantById("fields")!.focused).toBe(true);
     await app.perform("logs"); await tick(ui);
-    expect(logs.visible).toBe(true);
+    tasks.setSelectedIndex(tasks.options.findIndex((item) => item.value === firstId)); await tick(ui);
+    expect((ui.renderer.root.findDescendantById("selected-task-status") as TextRenderable).plainText).toContain(a);
+    expect(logs.options.some((item) => item.name.includes("fixture watch ready"))).toBe(true);
+    const recordsAtStart = await taskRecords();
+    expect(logs.options.some((item) => item.name.includes(recordsAtStart[0].run))).toBe(true);
+    expect(logs.options.some((item) => item.name.includes(recordsAtStart[1].run))).toBe(false);
+    const before = logs.getSelectedIndex();
+    ui.mockInput.pressKey("?"); await tick(ui); await escape(ui);
+    expect(logs.getSelectedIndex()).toBe(before);
     ui.resize(64, 24); await tick(ui);
-    expect(projects.height).toBeGreaterThanOrEqual(2); expect(categories.height).toBeGreaterThanOrEqual(2);
-    expect(control.x + control.width).toBeLessThanOrEqual(ui.renderer.width - 1);
-    expect(ui.captureCharFrame()).toContain("停止本地任务");
-    await saveProof("task-running-64x24.txt", ui.captureCharFrame());
-    await ui.mockMouse.click(control.x + 2, control.y + 1);
-    ui.mockInput.pressKey("k", { ctrl: true }); await tick(ui);
-    expect(control.visible).toBe(true);
-    // Parent exits first; a TERM-resistant child must keep both the busy guard and Stop state alive.
-    await app.perform("run"); expect(await taskRecords()).toHaveLength(1);
-    await saveProof("task-stopping-64x24.txt", ui.captureCharFrame());
-    await first.running;
+    ui.mockInput.pressKey("k", { ctrl: true });
+    await settle(ui, () => tasks.options.some((item) => item.value === firstId && item.name.includes("已取消")));
+    expect(firstPids.every((pid) => !alive(pid))).toBe(true);
+    expect(allPids.filter((pid) => !firstPids.includes(pid)).every(alive)).toBe(true);
+    expect(tasks.options.find((item) => item.value === secondId)!.name).toContain("运行中");
+    tasks.setSelectedIndex(tasks.options.findIndex((item) => item.value === secondId)); await tick(ui);
+    expect(logs.options.some((item) => item.name.includes(recordsAtStart[1].run))).toBe(true);
+    expect(logs.options.some((item) => item.name.includes(recordsAtStart[0].run))).toBe(false);
+    expect(logs.options.some((item) => item.name.includes("已取消"))).toBe(false);
+    const stopButton = ui.renderer.root.findDescendantById("stop-selected-task")!;
+    await ui.mockMouse.click(stopButton.x + 1, stopButton.y);
     await settle(ui, () => !control.visible);
     expect(allPids.every((pid) => !alive(pid))).toBe(true);
-    expect(logs.options.filter((option) => option.name.includes("已取消"))).toHaveLength(1);
-    expect(logs.options.some((option) => option.name.includes("结束，退出码 0"))).toBe(false);
-    ui.mockInput.pressKey("1"); await tick(ui); ui.mockInput.pressEnter();
-    await settle(ui, () => (ui.renderer.root.findDescendantById("workspace-title") as TextRenderable).plainText.includes(b));
-    const second = await start();
-    ui.mockInput.pressKey("?"); await tick(ui);
-    // The page header must stay clickable even while the read-only help overlay is open.
-    await ui.mockMouse.click(control.x + 2, control.y);
-    ui.mockInput.pressKey("k", { ctrl: true });
-    await second.running; await settle(ui, () => !control.visible);
-    expect(ui.renderer.root.findDescendantById("shortcut-help")).toBeDefined();
-    await escape(ui);
-    const third = await start();
-    const properties = app.perform("properties", a); await settle(ui, () => !!modal(ui));
-    ui.mockInput.pressKey("k", { ctrl: true });
-    await third.running; await settle(ui, () => !control.visible);
-    expect(modal(ui)).toBeDefined(); await escape(ui); await properties;
-    const settingsStop = await start();
-    ui.mockInput.pressKey(","); await tick(ui);
-    ui.mockInput.pressKey("k", { ctrl: true });
-    await settingsStop.running; await settle(ui, () => !control.visible);
-    expect(ui.renderer.root.findDescendantById("workspace-settings")).toBeDefined();
-    await escape(ui);
-    const fourth = await start();
-    ui.mockInput.pressKey("t"); await tick(ui); await choose(ui, "stop");
-    await fourth.running; await settle(ui, () => !control.visible);
-    expect(allPids.every((pid) => !alive(pid))).toBe(true);
-    const operationStop = await start();
-    ui.mockInput.pressKey("4"); await tick(ui);
-    for (let group = 0; group < 3; group++) { ui.mockInput.pressKey("]"); await tick(ui); }
-    const actions = ui.renderer.root.findDescendantById("actions") as SelectRenderable;
-    const stopIndex = actions.options.findIndex((option) => option.value === "stop");
-    expect(stopIndex).toBeGreaterThanOrEqual(0);
-    while (actions.getSelectedIndex() < stopIndex) ui.mockInput.pressArrow("down");
-    ui.mockInput.pressEnter();
-    await operationStop.running; await settle(ui, () => !control.visible);
-    expect(actions.options.some((option) => option.value === "stop")).toBe(false);
+    expect(tasks.options.filter((item) => item.name.includes("已取消"))).toHaveLength(2);
+    await saveProof("concurrent-task-history.txt", ui.captureCharFrame());
     // Stop while executable() is still awaiting filesystem lookup: no extra help process may be spawned.
     const helpsBefore = await fs.readFile(helpRecord, "utf8");
     const reconnect = app.perform("connect");
@@ -626,8 +619,9 @@ if(args.includes('--help')) {
     await saveProof("devices-query-cancelled-retry.txt", ui.captureCharFrame());
     await escape(ui); await query;
     const exiting = await start();
+    const exitingSecond = await start();
     ui.mockInput.pressKey("q"); await tick(ui); await choose(ui, "yes");
-    await exiting.running; await ui.renderer.closed;
+    await exiting.running; await exitingSecond.running; await ui.renderer.closed;
     expect(allPids.every((pid) => !alive(pid))).toBe(true);
     await fs.rm(join(root, "candidate-ready"));
     const closingUi = await createTestRenderer({ width: 64, height: 24, exitOnCtrlC: false });

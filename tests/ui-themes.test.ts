@@ -70,10 +70,10 @@ test("selected tabs and settings rows paint trailing cells and empty lines", asy
   const ui = await createTestRenderer({ width: 120, height: 40, exitOnCtrlC: false });
   const app = new Workspace(ui.renderer);
   try {
-    await tick(ui);
+    ui.mockInput.pressKey("3"); await tick(ui);
     const root = ui.renderer.root.findDescendantById("workspace")!;
     const findTab = (node: typeof root): TextRenderable | undefined => {
-      if (node instanceof TextRenderable && node.plainText === "3 字段") return node;
+      if (node instanceof TextRenderable && node.plainText === "常规") return node;
       for (const child of node.getChildren()) { const found = findTab(child); if (found) return found; }
     };
     const tab = findTab(root)!;

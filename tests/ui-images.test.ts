@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { once } from "node:events";
 import { setImmediate as nextTurn } from "node:timers/promises";
 import sharp from "sharp";
-import { NativeImage, ImageRenderable } from "@opentui/core";
+import { NativeImage, ImageRenderable, type SelectRenderable } from "@opentui/core";
 import { createTestRenderer, setRendererCapabilities, type TestRendererSetup } from "@opentui/core/testing";
 import { ProjectFiles, ProjectRegistry } from "../src/projects.js";
 import { decodeProjectImage, IMAGE_BYTE_LIMIT } from "../src/image-preview.js";
@@ -224,7 +224,7 @@ test("simulated kitty capability loads only visible icons and clears recycled na
   } finally { dialogs.cancelActive(); setup.renderer.keyInput.off("keypress", handler); await setup.dispose(); }
 });
 
-test("navigation lists share the full height independently of focus and overlay lifetime", async () => {
+test("project rail stays stable across pages and restores after image preview", async () => {
   const root = await fs.mkdtemp(join(tmpdir(), "lazyhb-navigation-"));
   const previous = process.env.LAZYHB_STATE_DIR;
   process.env.LAZYHB_STATE_DIR = join(root, "state");
@@ -241,34 +241,24 @@ test("navigation lists share the full height independently of focus and overlay 
     await app.init(); await tick(setup);
     const projects = setup.renderer.root.findDescendantById("projects")!;
     const categories = setup.renderer.root.findDescendantById("categories")!;
-    expect(categories.visible).toBe(true); expect(projects.visible).toBe(true);
-    const expectFilledNavigation = (selected: typeof projects) => {
-      const projectPanel = projects.parent!, categoryPanel = categories.parent!;
-      expect(Math.abs(projectPanel.height + categoryPanel.height - categoryPanel.parent!.height)).toBeLessThanOrEqual(1);
-      expect(projects.visible && categories.visible).toBe(true);
-      expect(projects.height).toBeGreaterThanOrEqual(2); expect(categories.height).toBeGreaterThanOrEqual(2);
-      expect(selected.parent!.height).toBeGreaterThan((selected === categories ? projects : categories).parent!.height);
-    };
-    expectFilledNavigation(categories);
+    expect(projects.visible).toBe(true);
+    const projectHeight = projects.height;
     setup.mockInput.pressKey("3"); await tick(setup);
-    expect(categories.visible).toBe(true); expectFilledNavigation(categories);
+    expect(categories.parent!.parent!.visible).toBe(true);
+    expect(projects.height).toBe(projectHeight);
     setup.mockInput.pressKey("1"); await tick(setup);
-    expect(projects.visible).toBe(true); expect(categories.visible).toBe(true);
-    expectFilledNavigation(projects);
+    expect(projects.height).toBe(projectHeight);
     setup.mockInput.pressKey("4"); await tick(setup);
-    expect(projects.visible).toBe(true); expectFilledNavigation(projects);
+    expect(categories.parent!.parent!.visible).toBe(false);
     setup.mockInput.pressKey("?"); await tick(setup);
     await escape(setup);
-    await setup.waitFor(() => !setup.renderer.root.findDescendantById("shortcut-help"));
-    expect(projects.visible).toBe(true);
+    expect(setup.renderer.root.findDescendantById("task-output")!.focused).toBe(true);
     setup.mockInput.pressKey("t", { ctrl: true }); await tick(setup);
-    expect(projects.visible).toBe(true);
     setup.resize(72, 24); await tick(setup);
-    expectFilledNavigation(projects);
-    setup.mockInput.pressKey("2"); await tick(setup);
-    await setup.waitFor(() => categories.visible);
-    expect(categories.visible).toBe(true); expect(projects.visible).toBe(true);
-    await settle(setup, () => setup.captureCharFrame().includes("CLI 不可执行或不存在"));
+    setup.mockInput.pressKey("3"); await tick(setup);
+    expect(categories.parent!.parent!.visible).toBe(true);
+    expect(projects.visible).toBe(true);
+    await settle(setup, () => (setup.renderer.root.findDescendantById("task-output") as SelectRenderable).options.some((item) => item.name.includes("不可执行")));
     const managing = app.perform("files");
     await waitForNode(setup, "file-browser-list");
     setup.mockInput.pressKey("END"); await tick(setup); setup.mockInput.pressEnter();
@@ -311,7 +301,7 @@ test("file browser h/l traverses confined directories, restores selection and le
     await new ProjectRegistry().add(project);
     app = new Workspace(setup.renderer, { project, cli: join(root, "missing-cli") });
     await app.init();
-    await settle(setup, () => setup.captureCharFrame().includes("CLI 不可执行或不存在"));
+    await settle(setup, () => (setup.renderer.root.findDescendantById("task-output") as SelectRenderable).options.some((item) => item.name.includes("不可执行")));
     const managing = app.perform("files");
     await waitForNode(setup, "file-browser-list");
     const press = async (key: string) => { setup.mockInput.pressKey(key); await tick(setup); };
