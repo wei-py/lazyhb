@@ -145,3 +145,30 @@ test("enum form fields preserve explicit false, omitted defaults and field navig
     await ui.dispose();
   }
 });
+
+test("submitting an incomplete form focuses the missing field without losing an enum selection", async () => {
+  const ui = await createTestRenderer({ width: 100, height: 30, exitOnCtrlC: false });
+  const dialogs = new Dialogs(ui.renderer, () => {});
+  const handler = (key: Parameters<Dialogs["handleKey"]>[0]) => dialogs.handleKey(key);
+  ui.renderer.keyInput.on("keypress", handler);
+  try {
+    const result = dialogs.form("Cloud pack", [
+      { key: "android.packagename", label: "--android.packagename", required: true },
+      { key: "dsyms", label: "--dsyms", choices: ["true", "false"] },
+    ], (values) => { if (!values["android.packagename"]) throw new Error("Missing android.packagename"); });
+    await tick(ui);
+    ui.mockInput.pressArrow("down", { meta: true }); await tick(ui);
+    ui.mockInput.pressArrow("down"); await tick(ui);
+    ui.mockInput.pressKey("s", { ctrl: true }); await tick(ui);
+    const formLabel = ui.renderer.root.getChildren().flatMap((node) => node.getChildren())
+      .find((node) => "plainText" in node && /^\d+\/\d+ /.test(String(node.plainText))) as TextRenderable;
+    expect(formLabel.plainText).toContain("--android.packagename");
+    await ui.mockInput.typeText("com.example.app");
+    ui.mockInput.pressArrow("down", { meta: true }); await tick(ui);
+    expect((ui.renderer.root.findDescendantById("form-enum") as SelectRenderable).getSelectedOption()?.value).toBe("true");
+    ui.mockInput.pressKey("s", { ctrl: true }); await tick(ui);
+    expect(await result).toEqual({ "android.packagename": "com.example.app", dsyms: "true" });
+  } finally {
+    dialogs.cancelActive(); ui.renderer.keyInput.off("keypress", handler); await ui.dispose();
+  }
+});

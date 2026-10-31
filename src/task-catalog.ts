@@ -123,10 +123,31 @@ export function taskParameters(choice: TaskChoice, values: Record<string, string
   });
 }
 
+export function taskRequiredParameters(choice: TaskChoice, values: Record<string, string>): string[] {
+  const required: string[] = [];
+  const name = choice.command.name;
+  if (name === "pack" && !choice.id.endsWith(":config")) {
+    const platforms = (values.platform || "android").split(",");
+    if (platforms.includes("android")) {
+      required.push("android.packagename");
+      if ((values["android.androidpacktype"] || "0") === "0")
+        required.push("android.certalias", "android.certfile", "android.certpassword", "android.storepassword");
+    }
+    if (platforms.includes("ios")) required.push("ios.bundle");
+  }
+  if (choice.id.endsWith(":subpackage")) required.push("subPackage");
+  if ((name.startsWith("publish mp-") || name === "publish" && choice.target.startsWith("mp-")) && values.upload === "true")
+    required.push("appid", "privatekey");
+  if ((name === "publish web" || name === "publish" && choice.target === "web") && values.webHosting === "true")
+    required.push("provider", "spaceId");
+  if (choice.id.endsWith(":config")) required.push("config");
+  if (name === "pack cancel") required.push("platform");
+  return required.filter((key) => choice.command.parameters.some((parameter) => parameter.name === key));
+}
+
 export function validateTask(choice: TaskChoice, values: Record<string, string>): void {
-  const require = (key: string) => {
-    if (choice.command.parameters.some((parameter) => parameter.name === key) && !values[key]?.trim()) throw new Error(`当前模式必须填写 --${key}`);
-  };
+  for (const key of taskRequiredParameters(choice, values))
+    if (!values[key]?.trim()) throw new Error(`当前模式必须填写 --${key}`);
   for (const [key, value] of Object.entries(choice.defaults)) if (values[key] !== value) throw new Error(`此模式固定 --${key} ${value}`);
   if (choice.command.name === "launch web" && values.browser) {
     const browser = choice.command.parameters.find((parameter) => parameter.name === "browser");
@@ -135,17 +156,7 @@ export function validateTask(choice: TaskChoice, values: Record<string, string>)
   if (choice.command.name === "pack" && !choice.id.endsWith(":config")) {
     const platforms = (values.platform || "android").split(",");
     if (platforms.some((platform) => !["android", "ios"].includes(platform))) throw new Error("云打包平台仅 android / ios，使用英文逗号多选");
-    if (platforms.includes("android")) {
-      require("android.packagename");
-      if ((values["android.androidpacktype"] || "0") === "0") for (const key of ["android.certalias", "android.certfile", "android.certpassword", "android.storepassword"]) require(key);
-    }
-    if (platforms.includes("ios")) require("ios.bundle");
   }
-  if (choice.id.endsWith(":subpackage")) require("subPackage");
   if (values.subPackage && values.upload !== undefined) throw new Error("当前 CLI help 规定 subPackage 与 upload 不能同时填写");
-  if ((choice.command.name.startsWith("publish mp-") || choice.command.name === "publish" && choice.target.startsWith("mp-")) && values.upload === "true") { require("appid"); require("privatekey"); }
   if (values.robot && (!/^\d+$/.test(values.robot) || +values.robot < 1 || +values.robot > 30)) throw new Error("robot 必须为 1–30");
-  if ((choice.command.name === "publish web" || choice.command.name === "publish" && choice.target === "web") && values.webHosting === "true") { require("provider"); require("spaceId"); }
-  if (choice.id.endsWith(":config")) require("config");
-  if (choice.command.name === "pack cancel") require("platform");
 }

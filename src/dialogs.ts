@@ -28,6 +28,7 @@ export interface Entry {
   choices?: readonly string[];
   allowOmit?: boolean;
   defaultValue?: string;
+  required?: boolean;
 }
 export interface FileChoiceRow {
   value: string;
@@ -647,7 +648,7 @@ export class Dialogs {
     const show = () => {
       const entry = entries[index];
       label.content = entry
-        ? `${index + 1}/${entries.length} ${entry.label}\n${entry.description ?? ""}${entry.secret ? "\n凭据已遮罩；Ctrl+U 清空，支持粘贴" : ""}`
+        ? `${index + 1}/${entries.length} ${entry.label}${entry.required ? "（必填）" : ""}\n${entry.description ?? ""}${entry.secret ? "\n凭据已遮罩；Ctrl+U 清空，支持粘贴" : ""}`
         : "无参数，Ctrl+S 继续";
       const enumerated = !!entry?.choices?.length && !entry.secret;
       editor.visible = !entry?.secret && !enumerated;
@@ -692,13 +693,17 @@ export class Dialogs {
     const submit = async () => {
       if (submitting || closed) return;
       store();
+      const invalid = entries.findIndex((entry) => entry.required && !values[entry.key].trim() ||
+        !entry.secret && !!entry.choices?.length &&
+        (values[entry.key] === "" ? entry.allowOmit === false : !entry.choices.includes(values[entry.key])));
+      if (invalid >= 0) {
+        index = invalid;
+        show(); focusEditor();
+        error.content = `${entries[index].label}：${entries[index].choices?.length ? "请选择有效选项" : "这是必填项，请填写后提交"}；其它已填内容已保留。`;
+        return;
+      }
       submitting = true;
       try {
-        for (const entry of entries) {
-          if (!entry.secret && entry.choices?.length &&
-            (values[entry.key] === "" ? entry.allowOmit === false : !entry.choices.includes(values[entry.key])))
-            throw new Error(`${entry.label}：请选择允许的值`);
-        }
         await validate?.(values);
         if (closed || this.modal?.box !== box) return;
         closed = true;
@@ -718,7 +723,7 @@ export class Dialogs {
     box.add(
       this.createText({
         content:
-          "枚举：↑↓ 选择 / Enter 下一字段 · Alt+↑↓ 切字段 · Ctrl+S 应用 · Esc 取消",
+          "枚举 ↑↓选择 / Enter下一字段 · Alt+↑↓切字段 · Ctrl+S检查并应用整份参数 · Esc取消",
         height: 2,
       }, "muted"),
     );
