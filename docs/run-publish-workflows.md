@@ -6,7 +6,7 @@
 
 [App 运行文档](https://hx.dcloud.net.cn/cli/launch-app)原文：不传 `--ui` 或 `--ui false` 为“纯 CLI 运行：在终端完成编译与运行”；`--ui true` 为“由 IDE 界面接管后续流程”（5.11+）。**ui 控制 IDE 接管，不是禁止目标浏览器/模拟器/开发者工具的开关。**
 
-lazyhb 已确认不打开外部 GUI，不能擅自改成可选 GUI 启动。App 真机、鸿蒙元服务设备运行与仅编译应分开；Web/普通小程序/快应用仅编译不能宣称完整运行。iOS 图形模拟器、IDE 接管及需要外部 GUI 的目标运行应解释限制，而非伪造无 GUI 支持。
+用户已明确允许在主动确认 Web 实际运行后打开浏览器；不允许据此启动 IDE 界面接管、开发者工具或 iOS 图形模拟器。Web 提供 `compile=false` 实际运行与 `compile=true` 仅编译两个独立模式，普通小程序／快应用仍保持仅编译。App 真机、鸿蒙元服务设备运行与仅编译继续分开，不把编译成功表述为已部署或已运行。
 
 [总览](https://hx.dcloud.net.cn/cli/README)明确“查看帮助文档，需要先启动 HBuilderX”；云打包和鸿蒙打包也有此前置。终端控制不证明 macOS/Windows 冷启动无窗口。Linux CLI 原文“不是 HBuilderX 可视化编辑器”，官方仅在 Ubuntu 测试，不代表三平台全部工具链已验证。
 
@@ -26,13 +26,15 @@ lazyhb 已确认不打开外部 GUI，不能擅自改成可选 GUI 启动。App 
 | `launch app-android` | [App](https://hx.dcloud.net.cn/cli/launch-app)：`ui`、`compile`、`native-log`、`cleanCache`、`continue-on-error` 均 true/false，默认 false；`deviceId` 默认首设备；`playground` standard/custom 默认 standard；`pagePath/pageQuery` 5.01+ | 真机运行与 `compile=true` 仅编译分开。自定义基座原文“仅支持云打包基座”；cleanCache 仅 uni-app x 生效 |
 | `launch app-ios` | [App](https://hx.dcloud.net.cn/cli/launch-app)：`iosTarget` device/simulator 默认 device；设备、基座、compile 同上；`peveloperCertificate`、`provisioningProfile`、`privateKey` 原文“开发 uts 插件需要” | 保留官方 `peveloperCertificate` 拼写，不擅改；模拟器受 noGUI 限制。privateKey 是密码，当前非 pack argv 凭据安全策略另有限制，不等于有字段就能安全执行 |
 | `launch app-harmony` | [App](https://hx.dcloud.net.cn/cli/launch-app)：`deviceId`、cleanCache、compile、continue-on-error、pagePath/pageQuery；未列 playground | 设备运行或仅编译；需要鸿蒙工具链和真机签名 |
-| `launch web` | [Web](https://hx.dcloud.net.cn/cli/launch-web)：compile 默认 false；browser 为 Built/Chrome/Firefox/Ie/Edge/Safari，默认 Built；continue-on-error 默认 false | 官方有真实浏览器运行，但本项目只允许显式 compile=true；编译成功不证明浏览器已运行 |
+| `launch web` | [Web](https://hx.dcloud.net.cn/cli/launch-web)：compile 默认 false；browser 为 Built/Chrome/Firefox/Ie/Edge/Safari，默认 Built；continue-on-error 默认 false | 显式 `ui=false` + `compile=false` 为实际运行，选择浏览器并确认后允许打开；`compile=true` 仍为仅编译。具体枚举以本机 help 为准，不能省略 compile 后隐式启动浏览器 |
 | `launch mp-weixin/mp-alipay/mp-baidu/mp-toutiao` | [小程序](https://hx.dcloud.net.cn/cli/launch-miniProgram)：project、ui、compile、continue-on-error、runtime-log；布尔默认 false | uni-app x 仅微信；其余 classic。当前仅编译；runtime-log 不是启动目标工具的免 GUI 许可 |
 | `launch mp-qq/mp-360/mp-jd/mp-kuaishou/mp-lark/mp-xhs` | [小程序](https://hx.dcloud.net.cn/cli/launch-miniProgram)：project、ui、compile、continue-on-error | 仅 classic；当前仅编译，不能从有 launch 推断有同名 publish |
 | `launch mp-harmony` | [小程序](https://hx.dcloud.net.cn/cli/launch-miniProgram)：仅 classic；deviceId 默认首设备，cleanCache/compile/continue-on-error 默认 false | 鸿蒙元服务设备运行，与普通小程序开发者工具运行不同；允许已准备工具链的设备运行及仅编译 |
 | `launch quickapp-webview-huawei/quickapp-webview-union` | [小程序](https://hx.dcloud.net.cn/cli/launch-miniProgram)：仅 classic；project、ui、compile、continue-on-error | 当前仅编译，不能称完整快应用运行 |
 
 [设备文档](https://hx.dcloud.net.cn/cli/devices-list)参数表：`devices list --platform` 为 `android`、`ios-iPhone`、`ios-simulator`、`mp-harmony`、`app-harmony`，默认 android。设备查询平台不全等于 launch target；应按当前 help 枚举查询，不猜设备 ID。查询列表不等于自动启动模拟器。
+
+多实例任务绑定启动时的项目与 browser／deviceId／iosTarget。官方文档证明独立设备寻址，但没有保证同一项目对多台设备同时编译时的缓存、输出目录或设备部署互不争用。当前本机 Web help 未提供 port／host／open 参数；端口来自项目 `h5.devServer` 或 `web.devServer`，实际监听地址以输出为准。停止任务只取消其本地 CLI 进程树，不声称关闭设备 App、浏览器或 HBuilderX 托管的服务。
 
 ## 发行矩阵：资源不是安装包
 
@@ -60,7 +62,7 @@ lazyhb 已确认不打开外部 GUI，不能擅自改成可选 GUI 启动。App 
 - **Ctrl+C 的边界。** 所查 launch／logcat 页面未明确规定 Ctrl+C 的设备生命周期语义。终端中断当前 CLI／日志监听，不能据此推断设备应用、HBuilderX 托管的运行任务或远端任务均已结束；lazyhb 中 `Ctrl+C` 是退出工作台并按需提示，`Ctrl+K` 才是停止当前本地任务。
 - **不要用退出 IDE 代替停止任务。** 总览和本机 help 的 `cli app quit` 原文为“关闭HBuilderX”，不是目标 App 停止接口；lazyhb 不会为取消一个任务关闭用户 IDE，也不改变 [noGUI 合同](doc.md)。
 - **云打包取消是独立远端操作。** pack 文档原文“取消 App 云打包任务”，5.14+ 的 `pack cancel` 使用 `project` 与一次一个 `app-ios`／`app-android` 平台；本机 help 同样列出这些参数，未提供远端 task ID。停止本地 pack／logcat 进程不能宣称云包已取消；应另行明确提交取消并查询 `pack status`，没有结果时保留“远端状态未确认”。
-- **工作台操作合同。** 顶部停止按钮、`Ctrl+K` 和工具组停止操作取消本地任务／连接／候选 CLI 验证；重复停止不重复启动取消流程，停止中等待本地进程树退出，之后可继续工作。取消候选验证不保存候选、不替换旧连接。忙时允许只读导航，拒绝冲突任务、写操作及项目切换但不向任务输出反复追加同一句阻塞消息。此为 lazyhb 的本地行为，不是官方 CLI 的设备关闭保证。
+- **工作台操作合同。** 任务日志页分别选择、查看、停止本地任务；并行任务使用独立执行实例，停止一个任务不取消其它任务。任务确认后启动即返回工作台，切页不停止后台进程。重复停止不重复启动取消流程；停止中等待该任务的本地进程树退出。退出须等待全部本地任务清理，活跃任务存在时不能替换 CLI。连接与候选 CLI 验证仍可取消；取消候选验证不保存候选、不替换旧连接。写操作与项目切换遵守冲突保护，提示不混入任务输出。此为 lazyhb 的本地行为，不是官方 CLI 的设备关闭保证；上游 CLI 是否允许同时操作同一设备／项目仍由工具本身决定。
 
 以上为所查版本和页面的证据范围，不断言所有 CLI 版本永远没有其它停止能力；也未通过真实设备、用户项目或云任务实测中断后的生命周期。
 
