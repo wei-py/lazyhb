@@ -15,7 +15,7 @@
     "build": "bun --bun ./node_modules/typescript/bin/tsc",
     "typecheck": "bun --bun ./node_modules/typescript/bin/tsc --noEmit",
     "start": "bun src/index.ts",
-    "smoke": "bun scripts/smoke.mjs && bun test tests/ui-images.test.ts tests/ui-operations.test.ts tests/ui-themes.test.ts tests/task-runner.test.ts tests/ui-palette.test.ts tests/multiplatform-runs.test.ts",
+    "smoke": "bun scripts/smoke.mjs && bun test tests/ui-images.test.ts tests/ui-operations.test.ts tests/ui-themes.test.ts tests/task-runner.test.ts tests/ui-palette.test.ts tests/multiplatform-runs.test.ts tests/pack-defaults.test.ts tests/pack-autofill.test.ts",
     "smoke:platform": "bun scripts/platform-smoke.mjs",
     "prepack": "bun run build"
   },

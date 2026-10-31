@@ -53,8 +53,9 @@ import { categoryDomains, categoryTabs, workspacePages } from "./navigation.js";
 import { loadFileIcon, fileTypeLabel } from "./file-icons.js";
 import { decodeProjectImage, isPreviewImage } from "./image-preview.js";
 import { tableRow, fieldColumns, actionColumns } from "./checklist.js";
-import { taskChoices, taskMode, taskParameters, validateTask, type TaskChoice, type TaskKind } from "./task-catalog.js";
+import { taskChoices, taskMode, taskParameters, taskRequiredParameters, validateTask, type TaskChoice, type TaskKind } from "./task-catalog.js";
 import { TaskRunner, type TaskRecord } from "./task-runner.js";
+import { loadPackDefaults } from "./pack-defaults.js";
 
 const MISSING = Symbol("missing manifest field");
 const actionGroups = [
@@ -1749,6 +1750,12 @@ export class Workspace {
     const command = choice.command;
     const configurationMode = choice.id.endsWith(":config");
     const parameters = { ...choice.defaults };
+    const defaults = command.name === "pack" && !configurationMode
+      ? await loadPackDefaults(capturedPath, this.document!) : new Map<string, { value: string; source: string }>();
+    for (const [key, suggestion] of defaults) {
+      const parameter = command.parameters.find((item) => item.name === key);
+      if (!parameter || parameter.choices.length && !parameter.choices.includes(suggestion.value)) defaults.delete(key);
+    }
     if (!configurationMode && choice.projectParameter) parameters[choice.projectParameter] = capturedPath;
     const controls = ["platform", "android.androidpacktype", "iscustom", "playground", "ssr", ...(choice.mode === "run" && choice.target === "web" ? ["browser"] : [])];
     for (const key of controls) {
@@ -1763,14 +1770,16 @@ export class Workspace {
       }
       if (projectKind(this.document!.data) === "uni-app-x" && key === "android.androidpacktype") options = options.filter((value) => !["2", "3"].includes(value));
       if (!options.length) continue;
-      const preferred = key === "browser" && options.includes("Chrome") ? "Chrome"
+      const projectValue = defaults.get(key)?.value;
+      const preferred = projectValue !== undefined && options.includes(projectValue) ? projectValue
+        : key === "browser" && options.includes("Chrome") ? "Chrome"
         : parameter.default && options.includes(parameter.default) ? parameter.default
           : ["iscustom", "ssr"].includes(key) && options.includes("false") ? "false"
             : key === "playground" && options.includes("standard") ? "standard" : options[0];
       options = [preferred, ...options.filter((value) => value !== preferred)];
       const selected = await this.dialogs.choice(`${choice.label} · --${key}`, options.map((value) => ({
         value, label: (key === "playground" ? value === "standard" ? "标准运行基座" : value === "custom" ? "自定义云打包运行基座" : value
-          : key === "iscustom" ? value === "true" ? "制作自定义调试基座（不是正式发行包）" : "正式应用安装包（不启用自定义基座）" : value) + (value === parameter.default ? "（CLI 默认）" : ""),
+          : key === "iscustom" ? value === "true" ? "制作自定义调试基座（不是正式发行包）" : "正式应用安装包（不启用自定义基座）" : value) + (value === projectValue ? "（项目配置）" : value === parameter.default ? "（CLI 默认）" : ""),
         description: key === "android.androidpacktype" ? ({ "0": "自有证书：后续必须填写证书和密码（仅私有 JSON 传递）", "1": "公共证书", "2": "DCloud 老版证书，仅 classic", "3": "云端证书，仅 classic" } as Record<string, string>)[value] : parameter.description,
       })), `项目已锁定：${capturedPath}\n产物：${choice.artifact}\n前置：${choice.prerequisites}${key === "browser" ? "\n确认运行后会打开所选浏览器；端口使用项目 Web devServer 配置，多个项目请避免端口冲突。" : ""}`);
       if (selected === undefined) return;
@@ -1825,26 +1834,31 @@ export class Workspace {
       command.parameters.some((parameter) => parameter.name === "ios.certfile")) {
       const signing = await this.dialogs.choice("iOS 云打包 · 签名资料", [
         { value: "existing", label: "不提供自定义证书", description: "使用平台现有配置 / 自定义基座方式；仍需 iOS bundle，最终能否打包由 CLI 校验" },
-        { value: "certificate", label: "填写自定义证书", description: "后续填写 profile、p12 和证书密码，仅通过私有 JSON 传递" },
+        { value: "certificate", label: defaults.has("ios.certfile") ? "使用项目已保存证书（可修改）" : "填写自定义证书", description: "已有路径自动带入；证书密码仍需遮罩输入，仅通过私有 JSON 传递" },
       ]);
       if (!signing) return;
       iosCertificate = signing === "certificate";
     }
     let packConfiguration: Record<string, unknown> | undefined;
+    const required = new Set(taskRequiredParameters(choice, parameters));
+    if (iosCertificate) for (const key of ["ios.profile", "ios.certfile", "ios.certpassword"]) required.add(key);
     const entries: Entry[] = taskParameters(choice, parameters).filter((parameter) =>
       !(parameter.name in parameters) &&
       !(choice.mode === "run" && parameter.name === "deviceId" && !parameter.required) &&
       !(command.name === "pack" && /^ios\.(profile|certfile|certpassword)$/.test(parameter.name) && !iosCertificate && !parameter.required) &&
       !(projectKind(this.document!.data) === "uni-app-x" && !parameter.required && /仅.*uni-app 项目/.test(parameter.description) && !/uni-app x/.test(parameter.description))
     ).map((parameter) => ({
-      key: parameter.name, label: "--" + parameter.name + (parameter.required ? "（必填）" : ""),
-      description: parameter.description + (parameter.choices.length ? "\n允许：" + parameter.choices.join(" / ") : "") + "\n留空使用 CLI / 项目默认值；不是输出项目选择器",
-      value: "",
+      key: parameter.name, label: "--" + parameter.name,
+      description: parameter.description + (parameter.choices.length ? "\n允许：" + parameter.choices.join(" / ") : "") +
+        (parameter.required || required.has(parameter.name) ? "\n当前模式必填；请填写后提交整份参数。" : "\n可选；留空或选择默认表示省略参数。") +
+        (defaults.has(parameter.name) ? "\n来源：" + defaults.get(parameter.name)!.source + "（可修改）" : ""),
+      value: defaults.get(parameter.name)?.value ?? "",
+      required: parameter.required || required.has(parameter.name),
       choices: parameter.choices,
-      allowOmit: !parameter.required,
+      allowOmit: !parameter.required && !required.has(parameter.name),
       defaultValue: parameter.default,
       secret: /password|secret|token|privatekey/i.test(parameter.name) || parameter.description.includes("密码"),
-    }));
+    })).sort((a, b) => Number(b.required) - Number(a.required));
     // Mode, target, platform and base are selected above, never editable as raw CLI switches.
     const validate = async (values: Record<string, string>) => {
       const submitted = { ...parameters, ...Object.fromEntries(Object.entries(values).filter(([, value]) => value !== "")) };
@@ -1937,9 +1951,10 @@ export class Workspace {
       if (!selected) return;
       command = this.commands.find((item) => item.name === selected)!;
       const values = await this.dialogs.form(selected, command.parameters.map((parameter) => ({
-        key: parameter.name, label: "--" + parameter.name + (parameter.required ? "（必填）" : ""),
-        description: parameter.description + "\n留空省略；无值开关填 @flag",
+        key: parameter.name, label: "--" + parameter.name,
+        description: parameter.description + (parameter.required ? "\n必填参数；请填写后提交。" : "\n可选；留空省略，无值开关填 @flag。"),
         value: parameter.name === "ui" ? "false" : ["project", "projectPath", "prj"].includes(parameter.name) ? capturedPath : "",
+        required: parameter.required,
         choices: parameter.choices,
         allowOmit: !parameter.required,
         defaultValue: parameter.default,

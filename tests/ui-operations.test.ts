@@ -306,7 +306,10 @@ else {
       return await fs.exists(record) ? (await fs.readFile(record, "utf8")).trim().split("\n").map((line) => JSON.parse(line)) : [];
     };
     const start = async (kind: "run" | "publish", target: string, mode: string) => {
-      const running = app!.perform(kind, project); await choose(ui, target); await choose(ui, mode); return { running };
+      const running = app!.perform(kind, project);
+      await choose(ui, target); await choose(ui, mode);
+      await settle(ui, () => !!modal(ui));
+      return { running };
     };
     const cancelledWeb = await start("run", "web", "launch web:run");
     await choose(ui, "Chrome");
