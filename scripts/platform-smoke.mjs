@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import {
   mkdtemp,
   mkdir,
@@ -56,6 +56,11 @@ async function exists(filename) {
 }
 
 function isAlive(pid) {
+  if (process.platform !== "win32") {
+    const state = spawnSync("/bin/ps", ["-o", "stat=", "-p", String(pid)], { encoding: "utf8" });
+    // An unreaped zombie has no executable process; unknown states remain live.
+    if (state.status === 0 && /^Z\S*$/.test(state.stdout.trim())) return false;
+  }
   try {
     process.kill(pid, 0);
     return true;

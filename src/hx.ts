@@ -1,4 +1,4 @@
-import { spawn, type ChildProcess } from "node:child_process";
+import { execFile, spawn, type ChildProcess } from "node:child_process";
 import * as fs from "node:fs/promises";
 import { constants } from "node:fs";
 import { delimiter, join, resolve, isAbsolute } from "node:path";
@@ -113,6 +113,37 @@ export interface Command {
   parameters: Parameter[];
 }
 const secret = /password|secret|token|privatekey|username/i;
+
+function collectConfigurationSecrets(value: unknown, values: string[]): void {
+  if (value && typeof value === "object")
+    for (const [key, child] of Object.entries(value)) {
+      if (secret.test(key) && typeof child === "string" && child)
+        values.push(child);
+      else collectConfigurationSecrets(child, values);
+    }
+}
+
+/** Display errors and task metadata with the same credential rules as CLI output. */
+export function redactCLIText(
+  text: string,
+  parameters: Record<string, string>,
+  configuration?: Record<string, unknown>,
+): string {
+  const values = Object.entries(parameters)
+    .filter(([key, value]) => secret.test(key) && value !== "@flag")
+    .map(([, value]) => value)
+    .filter(Boolean);
+  collectConfigurationSecrets(configuration, values);
+  const count = values.length;
+  for (let index = 0; index < count; index++) {
+    const normalized = terminalText()(values[index]);
+    if (normalized && normalized !== values[index]) values.push(normalized);
+  }
+  values.sort((a, b) => b.length - a.length);
+  let result = terminalText()(text);
+  for (const value of values) result = result.replaceAll(value, "[已隐藏]");
+  return result;
+}
 const blocked: Record<string, true> = {
   open: true,
   "open file": true,
@@ -245,13 +276,21 @@ export class HXClient {
   private cancellation?: Promise<void>;
   private stopping?: Promise<void>;
   private completion?: { promise: Promise<void>; resolve: () => void };
-  private commands = new Map<string, Command>();
+  private commands: ReadonlyMap<string, Command> = new Map();
   constructor(
     public readonly executable: string,
     private options: { argumentPrefix?: string[] } = {},
   ) {}
   get running(): boolean {
     return this.busy;
+  }
+  fork(): HXClient {
+    const client = new HXClient(this.executable, {
+      argumentPrefix: this.options.argumentPrefix?.slice(),
+    });
+    // Discovery replaces this map; published command objects are immutable.
+    client.commands = this.commands;
+    return client;
   }
   private beginInvocation(): void {
     if (this.busy) throw new Error("已有 CLI 调用进行中");
@@ -402,6 +441,14 @@ export class HXClient {
         "CLI 未提供可用能力；HBuilderX 后台可能未运行。\n" +
           text.slice(0, 1000),
       );
+    for (const command of commands) {
+      for (const parameter of command.parameters) {
+        Object.freeze(parameter.choices);
+        Object.freeze(parameter);
+      }
+      Object.freeze(command.parameters);
+      Object.freeze(command);
+    }
     this.commands = new Map(commands.map((item) => [item.name, item]));
     return commands;
   }
@@ -446,12 +493,16 @@ export class HXClient {
     if (!["false", "0"].includes((parameters.ui ?? "false").toLowerCase()))
       throw new Error("禁止 --ui true");
     if (name.startsWith("launch ")) {
-      if (!supported.has("ui"))
-        throw new Error("此 CLI 未暴露纯命令行运行模式");
+      if (!["false", "0"].includes(parameters.ui) || !supported.get("ui")?.choices.includes(parameters.ui))
+        throw new Error("此 CLI 未提供所选的显式 ui=false / 0 纯命令行模式");
       const target = name.split(" ")[1];
+      if (target === "web" && (
+        !["true", "false"].includes(parameters.compile) ||
+        !supported.get("compile")?.choices.includes(parameters.compile)
+      ))
+        throw new Error("Web 必须显式使用当前 CLI 支持的 --compile false（运行）或 --compile true（仅编译）");
       if (
-        (target === "web" ||
-          (/^(mp-|quickapp-)/.test(target) && target !== "mp-harmony")) &&
+        /^(mp-|quickapp-)/.test(target) && target !== "mp-harmony" &&
         parameters.compile?.toLowerCase() !== "true"
       )
         throw new Error("此目标只支持 --compile true（仅编译）");
@@ -531,15 +582,7 @@ export class HXClient {
             throw new Error("打包配置根节点必须是对象");
           if (options.packConfiguration && (!options.project || (settings as Record<string, unknown>).project !== options.project))
             throw new Error("云打包配置快照的项目绑定无效");
-          const collect = (value: unknown) => {
-            if (value && typeof value === "object")
-              for (const [key, child] of Object.entries(value)) {
-                if (secret.test(key) && typeof child === "string" && child)
-                  secrets.push(child);
-                else collect(child);
-              }
-          };
-          collect(settings);
+          collectConfigurationSecrets(settings, secrets);
           temporary = await fs.mkdtemp(join(tmpdir(), "lazyhb-pack-"));
           await fs.chmod(temporary, 0o700);
           const snapshot = join(temporary, "configure.json");
@@ -646,12 +689,54 @@ export class HXClient {
           throw error;
         }
       };
-      if (signal("SIGTERM")) {
-        const deadline = Date.now() + 3000;
-        while (signal(0) && Date.now() < deadline) await delay(30);
-        signal("SIGKILL");
+      try {
+        if (signal("SIGTERM")) {
+          const deadline = Date.now() + 3000;
+          let exists = signal(0);
+          while (exists && Date.now() < deadline) {
+            await delay(30);
+            exists = signal(0);
+          }
+          // Once ESRCH is observed the group is gone. Never signal that numeric
+          // ID again: the OS may subsequently reuse it for an unrelated process.
+          if (exists && signal("SIGKILL")) {
+            const deadline = Date.now() + 3000;
+            while (signal(0)) {
+              if (Date.now() >= deadline) {
+                if (!(await this.processGroupStopped(pid)))
+                  throw new Error("无法确认 CLI 进程树已停止：SIGKILL 后仍有存活进程");
+                break;
+              }
+              await delay(30);
+            }
+          }
+        }
+      } catch (error) {
+        // Darwin can return EPERM for a group containing only unreaped zombies.
+        // Permission errors alone never prove termination: confirm actual state.
+        if ((error as NodeJS.ErrnoException).code !== "EPERM" ||
+          !(await this.processGroupStopped(pid))) throw error;
       }
     }
     await closed;
+  }
+  private async processGroupStopped(pid: number): Promise<boolean> {
+    const { promise, resolve, reject } = Promise.withResolvers<string>();
+    execFile("/bin/ps", ["-e", "-o", "pgid=,stat="], {
+      encoding: "utf8", timeout: 1000, maxBuffer: 4 * 1024 * 1024,
+    }, (error, stdout) => {
+      if (error) reject(new Error("无法读取 CLI 进程组状态，未确认停止"));
+      else resolve(stdout);
+    });
+    const states = await promise;
+    for (const line of states.split("\n")) {
+      if (!line.trim()) continue;
+      const entry = /^\s*(\d+)\s+(\S+)\s*$/.exec(line);
+      if (!entry) throw new Error("CLI 进程组状态格式无效，未确认停止");
+      if (Number(entry[1]) === pid && !entry[2].startsWith("Z")) return false;
+    }
+    // Orphan zombies cannot execute or be killed again. Their eventual reaping
+    // belongs to the OS, not this invocation; an absent group is also stopped.
+    return true;
   }
 }
